@@ -1,6 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import * as storage from "@/lib/api-keys-storage";
 
+/**
+ * Validates an API key against the Supabase database.
+ * This endpoint queries the api_keys table in Supabase to verify
+ * if the provided API key exists and is valid.
+ */
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
@@ -13,6 +18,8 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    // Validate against Supabase database (not local storage)
+    // getApiKeyByKey queries the api_keys table directly from Supabase
     const key = await storage.getApiKeyByKey(apiKey.trim());
 
     if (!key) {
