@@ -1,28 +1,15 @@
 import { NextRequest, NextResponse } from "next/server";
-import * as storage from "../../../../lib/api-keys-storage";
+import * as storage from "@/lib/api-keys-storage";
 
-// GET - Get a single API key by ID
-export async function GET(
-  request: NextRequest,
-  { params }: { params: Promise<{ id: string }> }
-) {
-  const { id } = await params;
-  const apiKey = storage.getApiKeyById(id);
-
-  if (!apiKey) {
-    return NextResponse.json({ error: "API key not found" }, { status: 404 });
-  }
-
-  return NextResponse.json(apiKey);
+// GET - List all API keys
+export async function GET() {
+  const apiKeys = storage.getAllApiKeys();
+  return NextResponse.json(apiKeys);
 }
 
-// PUT - Update an API key
-export async function PUT(
-  request: NextRequest,
-  { params }: { params: Promise<{ id: string }> }
-) {
+// POST - Create a new API key
+export async function POST(request: NextRequest) {
   try {
-    const { id } = await params;
     const body = await request.json();
     const { name, key } = body;
 
@@ -33,38 +20,11 @@ export async function PUT(
       );
     }
 
-    const updatedKey = storage.updateApiKey(id, name, key);
-
-    if (!updatedKey) {
-      return NextResponse.json({ error: "API key not found" }, { status: 404 });
-    }
-
-    return NextResponse.json(updatedKey);
+    const newApiKey = storage.createApiKey(name, key);
+    return NextResponse.json(newApiKey, { status: 201 });
   } catch (error) {
     return NextResponse.json(
-      { error: "Failed to update API key" },
-      { status: 500 }
-    );
-  }
-}
-
-// DELETE - Delete an API key
-export async function DELETE(
-  request: NextRequest,
-  { params }: { params: Promise<{ id: string }> }
-) {
-  try {
-    const { id } = await params;
-    const deleted = storage.deleteApiKey(id);
-
-    if (!deleted) {
-      return NextResponse.json({ error: "API key not found" }, { status: 404 });
-    }
-
-    return NextResponse.json({ message: "API key deleted successfully" });
-  } catch (error) {
-    return NextResponse.json(
-      { error: "Failed to delete API key" },
+      { error: "Failed to create API key" },
       { status: 500 }
     );
   }

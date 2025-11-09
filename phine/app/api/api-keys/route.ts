@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import * as storage from "../../../lib/api-keys-storage";
+import * as storage from "@/lib/api-keys-storage";
 
 // GET - List all API keys
 export async function GET() {
