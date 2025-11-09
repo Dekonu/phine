@@ -37,16 +37,15 @@ export function Sidebar({ open, onClose }: SidebarProps) {
               </svg>
               Overview
             </Link>
-            <button
-              disabled
-              className="flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium text-zinc-400 transition-colors cursor-not-allowed dark:text-zinc-600"
-              title="Coming soon"
+            <Link
+              href="/playground"
+              className="flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium text-zinc-600 transition-colors hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-800"
             >
               <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
                 <path strokeLinecap="round" strokeLinejoin="round" d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4" />
               </svg>
               API Playground
-            </button>
+            </Link>
             <button
               disabled
               className="flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium text-zinc-400 transition-colors cursor-not-allowed dark:text-zinc-600"
