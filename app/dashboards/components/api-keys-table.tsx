@@ -185,26 +185,22 @@ export function ApiKeysTable({
                   <div className="flex items-center justify-end gap-2">
                     <button
                       onClick={async () => {
-                        // If we don't have the full key, fetch it first
-                        let keyToCopy = fullKeys.get(key.id);
-                        if (!keyToCopy) {
-                          try {
-                            const response = await fetch(`/api/api-keys/${key.id}/reveal`);
-                            if (response.ok) {
-                              const data = await response.json();
-                              keyToCopy = data.key;
-                              // Store it in fullKeys for future use
-                              // setFullKeys((prev) => new Map(prev).set(key.id, data.key)); // This line was removed as per the edit hint
+                        // Always fetch the full key from the API to ensure we get the actual key
+                        try {
+                          const response = await fetch(`/api/api-keys/${key.id}/reveal`);
+                          if (response.ok) {
+                            const data = await response.json();
+                            if (data.key) {
+                              onCopy(data.key);
                             } else {
-                              // If fetch fails, we can't copy the actual key
-                              return;
+                              console.error("No key in response");
                             }
-                          } catch (error) {
-                            console.error("Error fetching full key:", error);
-                            return;
+                          } else {
+                            console.error("Failed to fetch full key:", response.statusText);
                           }
+                        } catch (error) {
+                          console.error("Error fetching full key:", error);
                         }
-                        onCopy(keyToCopy);
                       }}
                       className="rounded p-1.5 text-zinc-600 transition-colors hover:bg-zinc-100 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-50"
                       title="Copy key"
