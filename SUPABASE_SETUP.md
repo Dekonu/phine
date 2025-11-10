@@ -64,7 +64,7 @@ For now, the service_role key will work for all operations.
 
 1. Start your Next.js development server:
    ```bash
-   npm run dev
+   yarn dev
    ```
 
 2. Navigate to your dashboards page
