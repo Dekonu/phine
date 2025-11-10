@@ -5,6 +5,8 @@ export interface ApiKey {
   createdAt: string;
   lastUsed?: string;
   usageCount: number;
+  remainingUses: number;
+  actualUsage?: number;
 }
 
 export interface ApiMetrics {

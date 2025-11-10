@@ -8,6 +8,8 @@ export interface ApiKey {
   createdAt: string;
   lastUsed?: string;
   usageCount: number; // Maximum number of API calls allowed
+  remainingUses: number; // Number of API calls remaining
+  actualUsage?: number; // Actual number of API calls made
 }
 
 export interface ApiUsage {
@@ -74,7 +76,30 @@ function dbRowToApiKey(row: any): ApiKey {
     createdAt: row.created_at || row.created_at_iso || new Date(row.created_at).toISOString(),
     lastUsed: row.last_used ? new Date(row.last_used).toISOString() : undefined,
     usageCount: row.usage_count || 1000,
+    remainingUses: row.remaining_uses !== undefined ? row.remaining_uses : (row.usage_count || 1000),
   };
+}
+
+/**
+ * Gets the actual usage count for an API key from the api_usage table
+ */
+async function getActualUsageCount(keyId: string): Promise<number> {
+  try {
+    const { count, error } = await supabaseServer
+      .from('api_usage')
+      .select('*', { count: 'exact', head: true })
+      .eq('key_id', keyId);
+
+    if (error) {
+      console.error('Error getting usage count:', error);
+      return 0;
+    }
+
+    return count || 0;
+  } catch (error) {
+    console.error('Failed to get actual usage count:', error);
+    return 0;
+  }
 }
 
 export async function getAllApiKeys(): Promise<ApiKey[]> {
@@ -89,14 +114,20 @@ export async function getAllApiKeys(): Promise<ApiKey[]> {
       throw error;
     }
 
-    // Return keys with masked values for security
-    return (data || []).map(row => {
-      const apiKey = dbRowToApiKey(row);
-      return {
-        ...apiKey,
-        key: maskApiKey(apiKey.key),
-      };
-    });
+    // Get usage counts for all keys in parallel
+    const keysWithUsage = await Promise.all(
+      (data || []).map(async (row) => {
+        const apiKey = dbRowToApiKey(row);
+        const actualUsage = await getActualUsageCount(apiKey.id);
+        return {
+          ...apiKey,
+          key: maskApiKey(apiKey.key),
+          actualUsage,
+        };
+      })
+    );
+
+    return keysWithUsage;
   } catch (error) {
     console.error('Failed to get all API keys:', error);
     return [];
@@ -122,8 +153,13 @@ export async function getApiKeyById(id: string): Promise<ApiKey | undefined> {
 
     if (!data) return undefined;
 
-    // Return full key (for display after creation or when explicitly requested)
-    return dbRowToApiKey(data);
+    // Return full key with actual usage count
+    const apiKey = dbRowToApiKey(data);
+    const actualUsage = await getActualUsageCount(apiKey.id);
+    return {
+      ...apiKey,
+      actualUsage,
+    };
   } catch (error) {
     console.error('Failed to get API key by ID:', error);
     return undefined;
@@ -168,6 +204,7 @@ export async function createApiKey(name: string): Promise<ApiKey> {
         key: generatedKey,
         created_at: now,
         usage_count: 1000, // Default usage count
+        remaining_uses: 1000, // Initialize remaining uses to match usage count
       })
       .select()
       .single();
@@ -246,7 +283,63 @@ export async function deleteApiKey(id: string): Promise<boolean> {
 }
 
 /**
+ * Checks if an API key has remaining uses and consumes one if available
+ * Returns true if usage was consumed, false if no remaining uses
+ */
+export async function checkAndConsumeUsage(keyId: string): Promise<boolean> {
+  try {
+    // Get current remaining uses
+    const { data, error: fetchError } = await supabaseServer
+      .from('api_keys')
+      .select('remaining_uses')
+      .eq('id', keyId)
+      .single();
+
+    if (fetchError || !data) {
+      console.error('Error fetching API key for usage check:', fetchError);
+      return false;
+    }
+
+    const currentRemaining = data.remaining_uses || 0;
+
+    // Check if there are remaining uses
+    if (currentRemaining <= 0) {
+      return false;
+    }
+
+    // Atomically decrement remaining_uses (only if > 0)
+    // Use RPC or a more atomic approach - for now, we'll update with a condition
+    const { data: updateData, error: updateError } = await supabaseServer
+      .from('api_keys')
+      .update({ 
+        remaining_uses: currentRemaining - 1,
+        last_used: new Date().toISOString()
+      })
+      .eq('id', keyId)
+      .gt('remaining_uses', 0) // Only update if remaining_uses > 0
+      .select()
+      .single();
+    
+    // Check if update actually happened (if remaining_uses was already 0, update won't affect any rows)
+    if (!updateData) {
+      return false;
+    }
+
+    if (updateError) {
+      console.error('Error updating remaining uses:', updateError);
+      return false;
+    }
+
+    return true;
+  } catch (error) {
+    console.error('Failed to check and consume usage:', error);
+    return false;
+  }
+}
+
+/**
  * Records API usage for analytics
+ * Note: This should be called AFTER checkAndConsumeUsage succeeds
  */
 export async function recordApiUsage(
   keyId: string,
@@ -269,12 +362,6 @@ export async function recordApiUsage(
       // Don't throw - usage tracking shouldn't break the API
       return;
     }
-
-    // Update lastUsed on the API key
-    await supabaseServer
-      .from('api_keys')
-      .update({ last_used: new Date().toISOString() })
-      .eq('id', keyId);
   } catch (error) {
     console.error('Failed to record API usage:', error);
     // Don't throw - usage tracking shouldn't break the API

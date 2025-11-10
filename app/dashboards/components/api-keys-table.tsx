@@ -121,7 +121,7 @@ export function ApiKeysTable({
                 Type
               </th>
               <th className="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
-                Usage
+                Remaining / Total
               </th>
               <th className="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
                 Key
@@ -143,7 +143,9 @@ export function ApiKeysTable({
                   </span>
                 </td>
                 <td className="whitespace-nowrap px-6 py-4 text-sm text-zinc-600 dark:text-zinc-400">
-                  0
+                  <span className={key.remainingUses <= 0 ? "text-red-600 dark:text-red-400 font-medium" : key.remainingUses <= 100 ? "text-orange-600 dark:text-orange-400" : ""}>
+                    {key.remainingUses ?? 0} / {key.usageCount}
+                  </span>
                 </td>
                 <td className="px-6 py-4 text-sm font-mono text-zinc-600 dark:text-zinc-400">
                   <div className="flex items-center gap-2">
