@@ -27,7 +27,8 @@
     "dotenv": "^17.2.3",
     "langchain": "^1.0.3",
     "reflect-metadata": "^0.1.13",
-    "rxjs": "^7.8.1"
+    "rxjs": "^7.8.1",
+    "zod": "^4.1.12"
   },
   "devDependencies": {
     "@nestjs/cli": "^10.0.0",

@@ -13,6 +13,7 @@ exports.GitHubSummarizerService = void 0;
 const common_1 = require("@nestjs/common");
 const api_keys_service_1 = require("../api-keys/api-keys.service");
 const github_rate_limit_service_1 = require("./github-rate-limit.service");
+const github_summarizer_response_schema_1 = require("./schemas/github-summarizer-response.schema");
 let GitHubSummarizerService = class GitHubSummarizerService {
     constructor(apiKeysService, rateLimitService) {
         this.apiKeysService = apiKeysService;
@@ -48,6 +49,9 @@ let GitHubSummarizerService = class GitHubSummarizerService {
         }
         let usageConsumed = false;
         const keyIdForUsage = freshKey.id;
+        let owner = null;
+        let repo = null;
+        let normalizedUrl = '';
         try {
             const hasRemainingUses = await this.apiKeysService.checkAndConsumeUsage(keyIdForUsage);
             if (!hasRemainingUses) {
@@ -72,15 +76,30 @@ let GitHubSummarizerService = class GitHubSummarizerService {
                 console.warn(`[GitHub Summarizer] Rate limit warning: ${rateLimitCheck.status.remaining} requests remaining. Reset at ${new Date(rateLimitCheck.status.reset * 1000).toISOString()}`);
             }
             const { GithubRepoLoader } = require('@langchain/community/document_loaders/web/github');
-            let normalizedUrl = gitHubUrl.trim();
+            normalizedUrl = gitHubUrl.trim();
             if (normalizedUrl.endsWith('/')) {
                 normalizedUrl = normalizedUrl.slice(0, -1);
             }
             if (normalizedUrl.endsWith('.git')) {
                 normalizedUrl = normalizedUrl.slice(0, -4);
             }
+            const urlMatch = normalizedUrl.match(/github\.com\/([^\/]+)\/([^\/]+)/i);
+            if (!urlMatch) {
+                throw new common_1.HttpException({ error: 'Invalid GitHub URL format' }, common_1.HttpStatus.BAD_REQUEST);
+            }
+            [, owner, repo] = urlMatch;
+            let defaultBranch = await this.detectDefaultBranch(owner, repo);
+            const commonBranches = ['main', 'master', 'develop', 'dev', 'trunk'];
+            if (!defaultBranch) {
+                defaultBranch = await this.tryBranches(owner, repo, commonBranches);
+            }
+            if (!defaultBranch) {
+                throw new common_1.HttpException({
+                    error: 'Unable to determine the default branch for this repository. The repository may be empty or inaccessible.',
+                }, common_1.HttpStatus.NOT_FOUND);
+            }
             const loader = new GithubRepoLoader(normalizedUrl, {
-                branch: undefined,
+                branch: defaultBranch,
                 recursive: true,
                 unknown: "ignore",
                 fileGlob: ["README.md", "readme.md", "README.MD", "readme.MD"],
@@ -110,6 +129,37 @@ let GitHubSummarizerService = class GitHubSummarizerService {
                         docs = [];
                         break;
                     }
+                    if ((lastError.message.includes('No commit found for the ref') ||
+                        lastError.message.includes('404')) && owner && repo) {
+                        const alternativeBranches = ['master', 'develop', 'dev', 'trunk', 'gh-pages'];
+                        const foundBranch = await this.tryBranches(owner, repo, alternativeBranches);
+                        if (foundBranch && foundBranch !== defaultBranch) {
+                            console.warn(`[GitHub Summarizer] Retrying with branch: ${foundBranch}`);
+                            const newLoader = new GithubRepoLoader(normalizedUrl, {
+                                branch: foundBranch,
+                                recursive: true,
+                                unknown: "ignore",
+                                fileGlob: ["README.md", "readme.md", "README.MD", "readme.MD"],
+                                ignoreFiles: [
+                                    "**/node_modules/**",
+                                    "**/.git/**",
+                                    "**/dist/**",
+                                    "**/build/**",
+                                    "**/.next/**",
+                                    "**/coverage/**",
+                                    "**/.github/**",
+                                ],
+                            });
+                            try {
+                                docs = await newLoader.load();
+                                lastError = null;
+                                break;
+                            }
+                            catch (retryError) {
+                                lastError = retryError instanceof Error ? retryError : new Error(String(retryError));
+                            }
+                        }
+                    }
                     const rateLimitInfo = this.rateLimitService.handleRateLimitError(lastError);
                     if (rateLimitInfo.shouldRetry && retryCount < maxRetries) {
                         retryCount++;
@@ -131,17 +181,21 @@ let GitHubSummarizerService = class GitHubSummarizerService {
                 return /^README\.md$/i.test(fileName);
             });
             if (readmeDocs.length === 0) {
-                return {
+                const noReadmeResponse = {
                     summary: "No README.md file found in this repository.",
+                    coolFacts: ["This repository does not contain a README file."],
                     filesAnalyzed: 0,
                     repo: gitHubUrl,
                 };
+                const validated = github_summarizer_response_schema_1.GitHubSummarizerResponseSchema.parse(noReadmeResponse);
+                await this.apiKeysService.recordApiUsage(keyIdForUsage, undefined, true);
+                return validated;
             }
             const readmeContent = readmeDocs
                 .map((doc) => doc.pageContent)
                 .filter((content) => content && content.trim().length > 0)
                 .join("\n\n---\n\n");
-            const extractKeyInfo = (text) => {
+            const extractInfo = (text) => {
                 if (text.includes('See https://help.github.com/articles/ignoring-files/')) {
                     return null;
                 }
@@ -153,6 +207,7 @@ let GitHubSummarizerService = class GitHubSummarizerService {
                     installation: [],
                     usage: [],
                     technologies: [],
+                    facts: [],
                 };
                 let currentSection = 'description';
                 let foundFirstHeader = false;
@@ -187,6 +242,9 @@ let GitHubSummarizerService = class GitHubSummarizerService {
                         else if (headerText.match(/(description|about|overview|introduction)/)) {
                             currentSection = 'description';
                         }
+                        else if (headerText.match(/(facts?|interesting|highlights?|notable|fun facts?)/)) {
+                            currentSection = 'facts';
+                        }
                         continue;
                     }
                     if (line.length > 0 &&
@@ -195,49 +253,86 @@ let GitHubSummarizerService = class GitHubSummarizerService {
                         !line.startsWith('|') &&
                         !line.match(/^\[.*\]\(.*\)$/) &&
                         line.length < 200) {
-                        if (sections[currentSection].length < 15) {
+                        if (sections[currentSection].length < 20) {
                             sections[currentSection].push(line);
                         }
                     }
                 }
                 const summaryParts = [];
                 if (sections.title.length > 0) {
-                    summaryParts.push(`**Project:** ${sections.title[0]}`);
+                    summaryParts.push(sections.title[0]);
                 }
                 if (sections.description.length > 0) {
-                    const desc = sections.description.slice(0, 8).join(' ');
+                    const desc = sections.description.slice(0, 10).join(' ').trim();
                     if (desc.length > 0) {
-                        summaryParts.push(`\n**Description:**\n${desc}`);
+                        summaryParts.push(desc);
                     }
-                }
-                if (sections.features.length > 0) {
-                    summaryParts.push(`\n**Key Features:**\n${sections.features.slice(0, 8).join('\n')}`);
-                }
-                if (sections.technologies.length > 0) {
-                    summaryParts.push(`\n**Technologies:**\n${sections.technologies.slice(0, 8).join('\n')}`);
                 }
                 if (summaryParts.length === 0) {
                     const cleanText = text.replace(/```[\s\S]*?```/g, '').replace(/\[.*?\]\(.*?\)/g, '').trim();
-                    return cleanText.substring(0, 1000) + (cleanText.length > 1000 ? '...' : '');
+                    const firstParagraph = cleanText.split('\n\n')[0] || cleanText.substring(0, 500);
+                    summaryParts.push(firstParagraph);
                 }
-                return summaryParts.join('\n\n');
-            };
-            const summary = extractKeyInfo(readmeContent);
-            if (!summary) {
+                const summary = summaryParts.join('. ').substring(0, 500).trim();
+                const coolFacts = [];
+                if (sections.features.length > 0) {
+                    sections.features.slice(0, 3).forEach((feature) => {
+                        if (feature.length > 20 && feature.length < 150) {
+                            coolFacts.push(feature);
+                        }
+                    });
+                }
+                if (sections.technologies.length > 0) {
+                    const techList = sections.technologies.slice(0, 5).join(', ');
+                    if (techList.length > 0) {
+                        coolFacts.push(`Built with: ${techList}`);
+                    }
+                }
+                if (sections.facts.length > 0) {
+                    sections.facts.slice(0, 5).forEach((fact) => {
+                        if (fact.length > 20 && fact.length < 200) {
+                            coolFacts.push(fact);
+                        }
+                    });
+                }
+                if (coolFacts.length < 3 && sections.description.length > 0) {
+                    sections.description.slice(5, 10).forEach((line) => {
+                        if (line.length > 30 && line.length < 150 && !coolFacts.includes(line)) {
+                            coolFacts.push(line);
+                        }
+                    });
+                }
+                if (coolFacts.length === 0) {
+                    coolFacts.push('This project has a comprehensive README with detailed documentation.');
+                }
                 return {
+                    summary: summary || 'A well-documented project with comprehensive information.',
+                    coolFacts: coolFacts.slice(0, 5),
+                };
+            };
+            const extractedInfo = extractInfo(readmeContent);
+            if (!extractedInfo) {
+                const errorResponse = {
                     summary: "Unable to extract summary from README. The file may be empty or in an unexpected format.",
+                    coolFacts: ["The repository may not contain a valid README file."],
                     filesAnalyzed: readmeDocs.length,
                     repo: gitHubUrl,
                     readmeLength: readmeContent.length,
                 };
+                const validated = github_summarizer_response_schema_1.GitHubSummarizerResponseSchema.parse(errorResponse);
+                await this.apiKeysService.recordApiUsage(keyIdForUsage, undefined, true);
+                return validated;
             }
-            await this.apiKeysService.recordApiUsage(keyIdForUsage, undefined, true);
-            return {
-                summary: summary,
+            const response = {
+                summary: extractedInfo.summary,
+                coolFacts: extractedInfo.coolFacts,
                 filesAnalyzed: readmeDocs.length,
                 repo: gitHubUrl,
                 readmeLength: readmeContent.length,
             };
+            const validatedResponse = github_summarizer_response_schema_1.GitHubSummarizerResponseSchema.parse(response);
+            await this.apiKeysService.recordApiUsage(keyIdForUsage, undefined, true);
+            return validatedResponse;
         }
         catch (error) {
             console.error('Error summarizing GitHub repository:', error);
@@ -248,6 +343,9 @@ let GitHubSummarizerService = class GitHubSummarizerService {
                 catch (recordError) {
                     console.error('Error recording failed usage:', recordError);
                 }
+            }
+            if (error instanceof common_1.HttpException) {
+                throw error;
             }
             let errorMessage = 'Failed to summarize GitHub repository';
             let statusCode = common_1.HttpStatus.INTERNAL_SERVER_ERROR;
@@ -263,8 +361,12 @@ let GitHubSummarizerService = class GitHubSummarizerService {
                 else if (error.message.includes('fetch failed')) {
                     errorMessage = 'Failed to fetch repository from GitHub. Please check that the repository URL is correct and accessible.';
                 }
+                else if (error.message.includes('No commit found for the ref') ||
+                    (error.message.includes('404') && error.message.includes('branch'))) {
+                    errorMessage = 'Repository branch not found. The repository may be empty or use a different branch name.';
+                }
                 else if (error.message.includes('404') || error.message.includes('Not Found')) {
-                    errorMessage = 'Repository not found. Please check that the GitHub URL is correct.';
+                    errorMessage = 'Repository not found. Please check that the GitHub URL is correct and the repository is accessible.';
                 }
                 else {
                     errorMessage = `Failed to summarize GitHub repository: ${error.message}`;
@@ -275,6 +377,46 @@ let GitHubSummarizerService = class GitHubSummarizerService {
     }
     sleep(ms) {
         return new Promise((resolve) => setTimeout(resolve, ms));
+    }
+    async detectDefaultBranch(owner, repo) {
+        try {
+            const response = await fetch(`https://api.github.com/repos/${owner}/${repo}`, {
+                method: 'GET',
+                headers: {
+                    Accept: 'application/vnd.github+json',
+                    'X-GitHub-Api-Version': '2022-11-28',
+                },
+            });
+            if (!response.ok) {
+                return null;
+            }
+            const data = await response.json();
+            return data.default_branch || null;
+        }
+        catch (error) {
+            console.warn(`[GitHub Summarizer] Failed to detect default branch for ${owner}/${repo}:`, error);
+            return null;
+        }
+    }
+    async tryBranches(owner, repo, branches) {
+        for (const branch of branches) {
+            try {
+                const response = await fetch(`https://api.github.com/repos/${owner}/${repo}/branches/${branch}`, {
+                    method: 'GET',
+                    headers: {
+                        Accept: 'application/vnd.github+json',
+                        'X-GitHub-Api-Version': '2022-11-28',
+                    },
+                });
+                if (response.ok) {
+                    return branch;
+                }
+            }
+            catch (error) {
+                continue;
+            }
+        }
+        return null;
     }
 };
 exports.GitHubSummarizerService = GitHubSummarizerService;

@@ -6,14 +6,12 @@ export declare class GitHubSummarizerService {
     constructor(apiKeysService: ApiKeysService, rateLimitService: GitHubRateLimitService);
     processRequest(apiKey: string, gitHubUrl: string): Promise<{
         summary: string;
+        coolFacts: string[];
         filesAnalyzed: number;
         repo: string;
-        readmeLength?: undefined;
-    } | {
-        summary: string;
-        filesAnalyzed: any;
-        repo: string;
-        readmeLength: any;
+        readmeLength?: number;
     }>;
     private sleep;
+    private detectDefaultBranch;
+    private tryBranches;
 }

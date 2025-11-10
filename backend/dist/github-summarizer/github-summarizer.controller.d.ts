@@ -5,13 +5,9 @@ export declare class GitHubSummarizerController {
     constructor(githubSummarizerService: GitHubSummarizerService);
     summarize(dto: GitHubSummarizerDto, headers: Record<string, string>): Promise<{
         summary: string;
+        coolFacts: string[];
         filesAnalyzed: number;
         repo: string;
-        readmeLength?: undefined;
-    } | {
-        summary: string;
-        filesAnalyzed: any;
-        repo: string;
-        readmeLength: any;
+        readmeLength?: number;
     }>;
 }
