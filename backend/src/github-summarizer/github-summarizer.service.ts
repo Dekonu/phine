@@ -1,27 +1,43 @@
 import { Injectable, HttpException, HttpStatus } from '@nestjs/common';
 import { ApiKeysService } from '../api-keys/api-keys.service';
+import { GitHubRateLimitService } from './github-rate-limit.service';
 
 @Injectable()
 export class GitHubSummarizerService {
-  constructor(private readonly apiKeysService: ApiKeysService) {}
+  constructor(
+    private readonly apiKeysService: ApiKeysService,
+    private readonly rateLimitService: GitHubRateLimitService,
+  ) {}
 
   async processRequest(apiKey: string, gitHubUrl: string) {
+    const originalApiKey = apiKey.trim();
+
     // Validate API key against database
-    const key = await this.apiKeysService.getApiKeyByKey(apiKey);
+    const key = await this.apiKeysService.getApiKeyByKey(originalApiKey);
 
     if (!key) {
       throw new HttpException({ error: 'Invalid API key' }, HttpStatus.UNAUTHORIZED);
     }
 
-    // Check if API key has remaining uses
-    const hasRemainingUses = await this.apiKeysService.checkAndConsumeUsage(key.id);
+    // Fetch fresh data from database to ensure we have current remaining uses
+    const freshKey = await this.apiKeysService.getApiKeyById(key.id);
+    if (!freshKey) {
+      throw new HttpException({ error: 'API key not found' }, HttpStatus.UNAUTHORIZED);
+    }
 
-    if (!hasRemainingUses) {
+    // Verify key string matches (safety check)
+    if (freshKey.key !== originalApiKey) {
+      console.error('[GitHub Summarizer] API key validation error: key mismatch');
+      throw new HttpException({ error: 'API key validation error' }, HttpStatus.INTERNAL_SERVER_ERROR);
+    }
+
+    // Check if API key has remaining uses
+    if (freshKey.remainingUses <= 0) {
       throw new HttpException(
         {
           error: 'API key usage limit exceeded',
-          remainingUses: key.remainingUses || 0,
-          usageCount: key.usageCount,
+          remainingUses: freshKey.remainingUses || 0,
+          usageCount: freshKey.usageCount,
         },
         HttpStatus.TOO_MANY_REQUESTS,
       );
@@ -34,15 +50,328 @@ export class GitHubSummarizerService {
       );
     }
 
-    // Record API usage for analytics (usage already consumed by checkAndConsumeUsage)
-    await this.apiKeysService.recordApiUsage(key.id, undefined, true);
+    // Validate GitHub URL format
+    const githubUrlPattern = /^https?:\/\/(www\.)?github\.com\/[\w\-\.]+\/[\w\-\.]+/i;
+    if (!githubUrlPattern.test(gitHubUrl.trim())) {
+      throw new HttpException(
+        { error: 'Invalid GitHub URL format. Expected format: https://github.com/owner/repo' },
+        HttpStatus.BAD_REQUEST,
+      );
+    }
 
-    // Placeholder response - doesn't do anything with the URL yet
-    return {
-      message: 'Request received successfully',
-      gitHubUrl: gitHubUrl.trim(),
-      status: 'pending',
-    };
+    // Use langchain to load and summarize only the README file
+    let usageConsumed = false;
+    const keyIdForUsage = freshKey.id;
+    try {
+      // Consume usage only after validation passes
+      const hasRemainingUses = await this.apiKeysService.checkAndConsumeUsage(keyIdForUsage);
+      if (!hasRemainingUses) {
+        throw new HttpException(
+          {
+            error: 'API key usage limit exceeded',
+            remainingUses: freshKey.remainingUses || 0,
+            usageCount: freshKey.usageCount,
+          },
+          HttpStatus.TOO_MANY_REQUESTS,
+        );
+      }
+      usageConsumed = true;
+
+      // Check GitHub API rate limits before making requests
+      // Note: We check without auth token since GithubRepoLoader may use unauthenticated requests
+      const rateLimitCheck = await this.rateLimitService.checkRateLimit();
+      
+      if (!rateLimitCheck.canProceed) {
+        throw new HttpException(
+          {
+            error: rateLimitCheck.error || 'GitHub API rate limit exceeded',
+            rateLimitReset: rateLimitCheck.status?.reset
+              ? new Date(rateLimitCheck.status.reset * 1000).toISOString()
+              : undefined,
+            waitTime: rateLimitCheck.waitTime,
+          },
+          HttpStatus.TOO_MANY_REQUESTS,
+        );
+      }
+
+      // Warn if rate limit is low but still allow
+      if (rateLimitCheck.error && rateLimitCheck.status) {
+        console.warn(
+          `[GitHub Summarizer] Rate limit warning: ${rateLimitCheck.status.remaining} requests remaining. Reset at ${new Date(rateLimitCheck.status.reset * 1000).toISOString()}`,
+        );
+      }
+
+      // Dynamically import required langchain modules for Github repo loading
+      // Using require for CommonJS compatibility in NestJS
+      const { GithubRepoLoader } = require('@langchain/community/document_loaders/web/github');
+
+      // Normalize GitHub URL - ensure it's in the correct format
+      let normalizedUrl = gitHubUrl.trim();
+      // Remove trailing slash
+      if (normalizedUrl.endsWith('/')) {
+        normalizedUrl = normalizedUrl.slice(0, -1);
+      }
+      // Remove .git extension if present
+      if (normalizedUrl.endsWith('.git')) {
+        normalizedUrl = normalizedUrl.slice(0, -4);
+      }
+
+      // Set up the loader to only load README files
+      const loader = new GithubRepoLoader(normalizedUrl, {
+        branch: undefined, // will use default branch
+        recursive: true, // Need recursive to find README files in subdirectories
+        unknown: "ignore", // Ignore unknown file types to prevent errors
+        // Only load README files - be more specific
+        fileGlob: ["README.md", "readme.md", "README.MD", "readme.MD"],
+        ignoreFiles: [
+          "**/node_modules/**",
+          "**/.git/**",
+          "**/dist/**",
+          "**/build/**",
+          "**/.next/**",
+          "**/coverage/**",
+          "**/.github/**",
+        ],
+      });
+
+      // Load documents and filter to only README files
+      // Implement retry logic with exponential backoff for rate limit errors
+      let docs;
+      const maxRetries = 3;
+      let retryCount = 0;
+      let lastError: Error | null = null;
+
+      while (retryCount <= maxRetries) {
+        try {
+          docs = await loader.load();
+          lastError = null;
+          break; // Success, exit retry loop
+        } catch (error) {
+          lastError = error instanceof Error ? error : new Error(String(error));
+
+          // Suppress "Failed wrap file content" warnings - they're non-critical
+          if (lastError.message.includes('Failed wrap file content')) {
+            docs = [];
+            break; // Non-critical, continue
+          }
+
+          // Check if it's a rate limit error
+          const rateLimitInfo = this.rateLimitService.handleRateLimitError(lastError);
+          
+          if (rateLimitInfo.shouldRetry && retryCount < maxRetries) {
+            retryCount++;
+            const waitTime = rateLimitInfo.waitTime * Math.pow(2, retryCount - 1); // Exponential backoff
+            console.warn(
+              `[GitHub Summarizer] Rate limit error (attempt ${retryCount}/${maxRetries}). Waiting ${waitTime}s before retry...`,
+            );
+            await this.sleep(waitTime * 1000); // Convert to milliseconds
+            
+            // Refresh rate limit status before retry
+            await this.rateLimitService.checkRateLimit();
+            continue;
+          }
+
+          // If not a rate limit error or max retries reached, throw
+          throw lastError;
+        }
+      }
+
+      // If we exhausted retries, throw the last error
+      if (lastError && !docs) {
+        throw lastError;
+      }
+
+      // Filter documents to only include README files by checking metadata
+      const readmeDocs = docs.filter((doc) => {
+        const source = doc.metadata?.source || '';
+        const fileName = source.split('/').pop() || '';
+        // Match README files (case-insensitive)
+        return /^README\.md$/i.test(fileName);
+      });
+
+      if (readmeDocs.length === 0) {
+        return {
+          summary: "No README.md file found in this repository.",
+          filesAnalyzed: 0,
+          repo: gitHubUrl,
+        };
+      }
+
+      // Combine all README content (should typically be just one)
+      const readmeContent = readmeDocs
+        .map((doc) => doc.pageContent)
+        .filter((content) => content && content.trim().length > 0)
+        .join("\n\n---\n\n");
+
+      // Extract key information from README using simple text analysis
+      // Look for common README sections
+      const extractKeyInfo = (text: string) => {
+        // Skip if content looks like it's not a README (e.g., .gitignore content)
+        if (text.includes('See https://help.github.com/articles/ignoring-files/')) {
+          return null; // This is likely .gitignore content, not README
+        }
+
+        const lines = text.split('\n');
+        const sections: Record<string, string[]> = {
+          title: [],
+          description: [],
+          features: [],
+          installation: [],
+          usage: [],
+          technologies: [],
+        };
+
+        let currentSection = 'description';
+        let foundFirstHeader = false;
+        
+        for (let i = 0; i < lines.length; i++) {
+          const line = lines[i].trim();
+          
+          // Skip empty lines at the start
+          if (!foundFirstHeader && line.length === 0) {
+            continue;
+          }
+          
+          // Detect main title (first # header)
+          if (line.startsWith('# ') && !foundFirstHeader) {
+            const title = line.replace(/^#+\s*/, '').trim();
+            if (title.length > 0) {
+              sections.title.push(title);
+              foundFirstHeader = true;
+              currentSection = 'description';
+            }
+            continue;
+          }
+          
+          // Detect section headers (## or ###)
+          if (line.match(/^##+\s+/)) {
+            const headerText = line.replace(/^#+\s*/, '').trim().toLowerCase();
+            
+            if (headerText.match(/(features?|what|about|overview)/)) {
+              currentSection = 'features';
+            } else if (headerText.match(/(install|setup|getting started|quick start)/)) {
+              currentSection = 'installation';
+            } else if (headerText.match(/(usage|how to use|example|examples|demo)/)) {
+              currentSection = 'usage';
+            } else if (headerText.match(/(tech|stack|built with|technologies?|tools|dependencies)/)) {
+              currentSection = 'technologies';
+            } else if (headerText.match(/(description|about|overview|introduction)/)) {
+              currentSection = 'description';
+            }
+            continue;
+          }
+          
+          // Add content to current section (skip markdown syntax, code blocks, etc.)
+          if (line.length > 0 && 
+              !line.startsWith('#') && 
+              !line.startsWith('```') &&
+              !line.startsWith('|') && // Skip markdown tables
+              !line.match(/^\[.*\]\(.*\)$/) && // Skip markdown links on their own line
+              line.length < 200) { // Skip very long lines (likely code blocks)
+            if (sections[currentSection].length < 15) {
+              sections[currentSection].push(line);
+            }
+          }
+        }
+
+        // Build summary from extracted sections
+        const summaryParts: string[] = [];
+        
+        if (sections.title.length > 0) {
+          summaryParts.push(`**Project:** ${sections.title[0]}`);
+        }
+        
+        if (sections.description.length > 0) {
+          const desc = sections.description.slice(0, 8).join(' ');
+          if (desc.length > 0) {
+            summaryParts.push(`\n**Description:**\n${desc}`);
+          }
+        }
+        
+        if (sections.features.length > 0) {
+          summaryParts.push(`\n**Key Features:**\n${sections.features.slice(0, 8).join('\n')}`);
+        }
+        
+        if (sections.technologies.length > 0) {
+          summaryParts.push(`\n**Technologies:**\n${sections.technologies.slice(0, 8).join('\n')}`);
+        }
+
+        // If no structured sections found, return first 1000 characters as summary
+        if (summaryParts.length === 0) {
+          const cleanText = text.replace(/```[\s\S]*?```/g, '').replace(/\[.*?\]\(.*?\)/g, '').trim();
+          return cleanText.substring(0, 1000) + (cleanText.length > 1000 ? '...' : '');
+        }
+
+        return summaryParts.join('\n\n');
+      };
+
+      // Generate summary from the README content
+      const summary = extractKeyInfo(readmeContent);
+
+      if (!summary) {
+        return {
+          summary: "Unable to extract summary from README. The file may be empty or in an unexpected format.",
+          filesAnalyzed: readmeDocs.length,
+          repo: gitHubUrl,
+          readmeLength: readmeContent.length,
+        };
+      }
+
+      // Record API usage for analytics
+      await this.apiKeysService.recordApiUsage(keyIdForUsage, undefined, true);
+
+      return {
+        summary: summary,
+        filesAnalyzed: readmeDocs.length,
+        repo: gitHubUrl,
+        readmeLength: readmeContent.length,
+      };
+    } catch (error) {
+      console.error('Error summarizing GitHub repository:', error);
+      
+      // If usage was consumed but request failed, record it as a failed request
+      if (usageConsumed) {
+        try {
+          await this.apiKeysService.recordApiUsage(keyIdForUsage, undefined, false);
+        } catch (recordError) {
+          console.error('Error recording failed usage:', recordError);
+        }
+      }
+
+      // Provide more helpful error messages
+      let errorMessage = 'Failed to summarize GitHub repository';
+      let statusCode = HttpStatus.INTERNAL_SERVER_ERROR;
+      
+      if (error instanceof Error) {
+        // Check for rate limit errors
+        const rateLimitInfo = this.rateLimitService.handleRateLimitError(error);
+        if (rateLimitInfo.shouldRetry) {
+          errorMessage = rateLimitInfo.error;
+          statusCode = HttpStatus.TOO_MANY_REQUESTS;
+        } else if (error.message.includes('Failed wrap file content')) {
+          // This is a non-critical warning, try to continue
+          errorMessage = 'Some files in the repository could not be processed, but the README should still be available.';
+        } else if (error.message.includes('fetch failed')) {
+          errorMessage = 'Failed to fetch repository from GitHub. Please check that the repository URL is correct and accessible.';
+        } else if (error.message.includes('404') || error.message.includes('Not Found')) {
+          errorMessage = 'Repository not found. Please check that the GitHub URL is correct.';
+        } else {
+          errorMessage = `Failed to summarize GitHub repository: ${error.message}`;
+        }
+      }
+
+      throw new HttpException(
+        { error: errorMessage },
+        statusCode,
+      );
+    }
+  }
+
+  /**
+   * Sleep utility for retry delays
+   */
+  private sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
   }
 }
 

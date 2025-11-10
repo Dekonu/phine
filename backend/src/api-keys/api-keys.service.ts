@@ -64,6 +64,7 @@ export class ApiKeysService {
 
   async getAllApiKeys(): Promise<ApiKey[]> {
     try {
+      // Fetch fresh data from database - ensure we get current remaining_uses
       const { data, error } = await this.supabaseService
         .getClient()
         .from('api_keys')
@@ -79,9 +80,14 @@ export class ApiKeysService {
         (data || []).map(async (row) => {
           const apiKey = this.dbRowToApiKey(row);
           const actualUsage = await this.getActualUsageCount(apiKey.id);
+          
+          // Ensure remainingUses is from the fresh database row
+          const remainingUses = row.remaining_uses !== undefined ? row.remaining_uses : apiKey.usageCount;
+          
           return {
             ...apiKey,
             key: this.maskApiKey(apiKey.key),
+            remainingUses, // Use fresh value from database
             actualUsage,
           };
         }),
@@ -107,7 +113,7 @@ export class ApiKeysService {
         if (error.code === 'PGRST116') {
           return undefined;
         }
-        console.error('Error fetching API key:', error);
+        console.error('Error fetching API key by ID:', error);
         throw error;
       }
 
@@ -115,6 +121,7 @@ export class ApiKeysService {
 
       const apiKey = this.dbRowToApiKey(data);
       const actualUsage = await this.getActualUsageCount(apiKey.id);
+      
       return {
         ...apiKey,
         actualUsage,
@@ -261,6 +268,7 @@ export class ApiKeysService {
         return false;
       }
 
+      // Perform atomic update with WHERE clause to prevent race conditions
       const { data: updateData, error: updateError } = await this.supabaseService
         .getClient()
         .from('api_keys')
@@ -270,15 +278,19 @@ export class ApiKeysService {
         })
         .eq('id', keyId)
         .gt('remaining_uses', 0)
-        .select()
+        .select('id')
         .single();
 
-      if (!updateData) {
+      if (!updateData || updateError) {
+        if (updateError) {
+          console.error('Error updating remaining uses:', updateError);
+        }
         return false;
       }
 
-      if (updateError) {
-        console.error('Error updating remaining uses:', updateError);
+      // Verify the key ID matches what we intended to update
+      if (updateData.id !== keyId) {
+        console.error('Critical error: Updated wrong key ID');
         return false;
       }
 

@@ -17,11 +17,15 @@
     "test:e2e": "jest --config ./test/jest-e2e.json"
   },
   "dependencies": {
+    "@langchain/community": "^1.0.0",
+    "@langchain/core": "^1.0.3",
+    "@langchain/openai": "^1.0.0",
     "@nestjs/common": "^10.0.0",
     "@nestjs/core": "^10.0.0",
     "@nestjs/platform-express": "^10.0.0",
     "@supabase/supabase-js": "^2.80.0",
     "dotenv": "^17.2.3",
+    "langchain": "^1.0.3",
     "reflect-metadata": "^0.1.13",
     "rxjs": "^7.8.1"
   },

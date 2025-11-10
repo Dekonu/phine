@@ -4,8 +4,14 @@ export declare class GitHubSummarizerController {
     private readonly githubSummarizerService;
     constructor(githubSummarizerService: GitHubSummarizerService);
     summarize(dto: GitHubSummarizerDto, headers: Record<string, string>): Promise<{
-        message: string;
-        gitHubUrl: string;
-        status: string;
+        summary: string;
+        filesAnalyzed: number;
+        repo: string;
+        readmeLength?: undefined;
+    } | {
+        summary: string;
+        filesAnalyzed: any;
+        repo: string;
+        readmeLength: any;
     }>;
 }

@@ -1,10 +1,19 @@
 import { ApiKeysService } from '../api-keys/api-keys.service';
+import { GitHubRateLimitService } from './github-rate-limit.service';
 export declare class GitHubSummarizerService {
     private readonly apiKeysService;
-    constructor(apiKeysService: ApiKeysService);
+    private readonly rateLimitService;
+    constructor(apiKeysService: ApiKeysService, rateLimitService: GitHubRateLimitService);
     processRequest(apiKey: string, gitHubUrl: string): Promise<{
-        message: string;
-        gitHubUrl: string;
-        status: string;
+        summary: string;
+        filesAnalyzed: number;
+        repo: string;
+        readmeLength?: undefined;
+    } | {
+        summary: string;
+        filesAnalyzed: any;
+        repo: string;
+        readmeLength: any;
     }>;
+    private sleep;
 }

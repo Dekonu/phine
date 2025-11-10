@@ -80,9 +80,11 @@ let ApiKeysService = class ApiKeysService {
             const keysWithUsage = await Promise.all((data || []).map(async (row) => {
                 const apiKey = this.dbRowToApiKey(row);
                 const actualUsage = await this.getActualUsageCount(apiKey.id);
+                const remainingUses = row.remaining_uses !== undefined ? row.remaining_uses : apiKey.usageCount;
                 return {
                     ...apiKey,
                     key: this.maskApiKey(apiKey.key),
+                    remainingUses,
                     actualUsage,
                 };
             }));
@@ -105,7 +107,7 @@ let ApiKeysService = class ApiKeysService {
                 if (error.code === 'PGRST116') {
                     return undefined;
                 }
-                console.error('Error fetching API key:', error);
+                console.error('Error fetching API key by ID:', error);
                 throw error;
             }
             if (!data)
@@ -252,13 +254,16 @@ let ApiKeysService = class ApiKeysService {
             })
                 .eq('id', keyId)
                 .gt('remaining_uses', 0)
-                .select()
+                .select('id')
                 .single();
-            if (!updateData) {
+            if (!updateData || updateError) {
+                if (updateError) {
+                    console.error('Error updating remaining uses:', updateError);
+                }
                 return false;
             }
-            if (updateError) {
-                console.error('Error updating remaining uses:', updateError);
+            if (updateData.id !== keyId) {
+                console.error('Critical error: Updated wrong key ID');
                 return false;
             }
             return true;
