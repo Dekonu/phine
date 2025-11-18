@@ -1,6 +1,5 @@
 import { Injectable, HttpException, HttpStatus } from '@nestjs/common';
 import { ApiKeysService } from '../api-keys/api-keys.service';
-import { GitHubRateLimitService } from './github-rate-limit.service';
 import {
   GitHubSummarizerResponseSchema,
   GitHubSummarizerResponse,
@@ -10,7 +9,6 @@ import {
 export class GitHubSummarizerService {
   constructor(
     private readonly apiKeysService: ApiKeysService,
-    private readonly rateLimitService: GitHubRateLimitService,
   ) {}
 
   async processRequest(apiKey: string, gitHubUrl: string) {
@@ -85,30 +83,6 @@ export class GitHubSummarizerService {
         }
         usageConsumed = true;
 
-        // Check GitHub API rate limits before making requests
-        // Note: We check without auth token since GithubRepoLoader may use unauthenticated requests
-        const rateLimitCheck = await this.rateLimitService.checkRateLimit();
-        
-        if (!rateLimitCheck.canProceed) {
-          throw new HttpException(
-            {
-              error: rateLimitCheck.error || 'GitHub API rate limit exceeded',
-              rateLimitReset: rateLimitCheck.status?.reset
-                ? new Date(rateLimitCheck.status.reset * 1000).toISOString()
-                : undefined,
-              waitTime: rateLimitCheck.waitTime,
-            },
-            HttpStatus.TOO_MANY_REQUESTS,
-          );
-        }
-
-        // Warn if rate limit is low but still allow
-        if (rateLimitCheck.error && rateLimitCheck.status) {
-          console.warn(
-            `[GitHub Summarizer] Rate limit warning: ${rateLimitCheck.status.remaining} requests remaining. Reset at ${new Date(rateLimitCheck.status.reset * 1000).toISOString()}`,
-          );
-        }
-
         // Dynamically import required langchain modules for Github repo loading
         // Using require for CommonJS compatibility in NestJS
         const { GithubRepoLoader } = require('@langchain/community/document_loaders/web/github');
@@ -134,124 +108,117 @@ export class GitHubSummarizerService {
         }
         [, owner, repo] = urlMatch;
 
-        // Try to detect the default branch
-        let defaultBranch = await this.detectDefaultBranch(owner, repo);
-        
-        // If detection fails, try common branch names
+        // Try common branch names directly with the loader
+        // This avoids rate limit issues from GitHub API calls
         const commonBranches = ['main', 'master', 'develop', 'dev', 'trunk'];
-        if (!defaultBranch) {
-          defaultBranch = await this.tryBranches(owner, repo, commonBranches);
-        }
-
-        if (!defaultBranch) {
-          throw new HttpException(
-            {
-              error: 'Unable to determine the default branch for this repository. The repository may be empty or inaccessible.',
-            },
-            HttpStatus.NOT_FOUND,
-          );
-        }
-
-        // Set up the loader to only load README files
-        const loader = new GithubRepoLoader(normalizedUrl, {
-          branch: defaultBranch,
-          recursive: true, // Need recursive to find README files in subdirectories
-          unknown: "ignore", // Ignore unknown file types to prevent errors
-          // Only load README files - be more specific
-          fileGlob: ["README.md", "readme.md", "README.MD", "readme.MD"],
-          ignoreFiles: [
-            "**/node_modules/**",
-            "**/.git/**",
-            "**/dist/**",
-            "**/build/**",
-            "**/.next/**",
-            "**/coverage/**",
-            "**/.github/**",
-          ],
-        });
-
-        // Load documents and filter to only README files
-        // Implement retry logic with exponential backoff for rate limit errors
         let docs;
-        const maxRetries = 3;
-        let retryCount = 0;
         let lastError: Error | null = null;
 
-        while (retryCount <= maxRetries) {
+        for (const branch of commonBranches) {
           try {
+            const loader = new GithubRepoLoader(normalizedUrl, {
+              branch: branch,
+              recursive: true, // Need recursive to find README files in subdirectories
+              unknown: "ignore", // Ignore unknown file types to prevent errors
+              // Only load README files - be more specific
+              fileGlob: ["README.md", "readme.md", "README.MD", "readme.MD"],
+              ignoreFiles: [
+                "**/node_modules/**",
+                "**/.git/**",
+                "**/dist/**",
+                "**/build/**",
+                "**/.next/**",
+                "**/coverage/**",
+                "**/.github/**",
+              ],
+            });
+
             docs = await loader.load();
             lastError = null;
-            break; // Success, exit retry loop
+            break; // Success, exit loop
           } catch (error) {
             lastError = error instanceof Error ? error : new Error(String(error));
-
-            // Suppress "Failed wrap file content" warnings - they're non-critical
-            if (lastError.message.includes('Failed wrap file content')) {
-              docs = [];
-              break; // Non-critical, continue
-            }
-
-            // Check if it's a branch-related error (404 for branch)
-            if ((lastError.message.includes('No commit found for the ref') || 
-                lastError.message.includes('404')) && owner && repo) {
-              // Try alternative branches
-              const alternativeBranches = ['master', 'develop', 'dev', 'trunk', 'gh-pages'];
-              const foundBranch = await this.tryBranches(owner, repo, alternativeBranches);
-              
-              if (foundBranch && foundBranch !== defaultBranch) {
-                console.warn(`[GitHub Summarizer] Retrying with branch: ${foundBranch}`);
-                // Create new loader with the found branch
-                const newLoader = new GithubRepoLoader(normalizedUrl, {
-                  branch: foundBranch,
-                  recursive: true,
-                  unknown: "ignore",
-                  fileGlob: ["README.md", "readme.md", "README.MD", "readme.MD"],
-                  ignoreFiles: [
-                    "**/node_modules/**",
-                    "**/.git/**",
-                    "**/dist/**",
-                    "**/build/**",
-                    "**/.next/**",
-                    "**/coverage/**",
-                    "**/.github/**",
-                  ],
-                });
-                
-                try {
-                  docs = await newLoader.load();
-                  lastError = null;
-                  break; // Success with alternative branch
-                } catch (retryError) {
-                  // Continue to rate limit check
-                  lastError = retryError instanceof Error ? retryError : new Error(String(retryError));
-                }
-              }
-            }
-
-            // Check if it's a rate limit error
-            const rateLimitInfo = this.rateLimitService.handleRateLimitError(lastError);
             
-            if (rateLimitInfo.shouldRetry && retryCount < maxRetries) {
-              retryCount++;
-              const waitTime = rateLimitInfo.waitTime * Math.pow(2, retryCount - 1); // Exponential backoff
-              console.warn(
-                `[GitHub Summarizer] Rate limit error (attempt ${retryCount}/${maxRetries}). Waiting ${waitTime}s before retry...`,
-              );
-              await this.sleep(waitTime * 1000); // Convert to milliseconds
-              
-              // Refresh rate limit status before retry
-              await this.rateLimitService.checkRateLimit();
-              continue;
+            // If it's a branch not found error, try next branch
+            if (lastError.message.includes('No commit found for the ref') ||
+                lastError.message.includes('404') ||
+                lastError.message.includes('not found')) {
+              continue; // Try next branch
             }
-
-            // If not a rate limit error or max retries reached, throw
-            throw lastError;
+            
+            // For other errors (rate limit, access denied, etc.), throw immediately
+            break;
           }
         }
 
-        // If we exhausted retries, throw the last error
-        if (lastError && !docs) {
-          throw lastError;
+        // If we exhausted all branches without success
+        if (!docs) {
+          // If we have an error, use it to determine the status code
+          if (lastError) {
+          // Determine appropriate status code based on error type
+          let errorMessage = 'Failed to load repository from GitHub';
+          let statusCode = HttpStatus.INTERNAL_SERVER_ERROR;
+
+          if (lastError instanceof Error) {
+            const errorMsg = lastError.message.toLowerCase();
+            
+            // Rate limit errors
+            if (errorMsg.includes('rate limit') || 
+                errorMsg.includes('429') ||
+                errorMsg.includes('too many requests') ||
+                errorMsg.includes('api rate limit')) {
+              statusCode = HttpStatus.TOO_MANY_REQUESTS;
+              errorMessage = 'GitHub API rate limit exceeded';
+            }
+            // Not found errors
+            else if (errorMsg.includes('404') || 
+                     errorMsg.includes('not found') ||
+                     errorMsg.includes('no commit found')) {
+              statusCode = HttpStatus.NOT_FOUND;
+              errorMessage = 'Repository not found or branch does not exist';
+            }
+            // Forbidden errors (could be rate limit or access denied)
+            else if (errorMsg.includes('403') || 
+                     errorMsg.includes('forbidden')) {
+              // Check if it's a rate limit issue
+              if (errorMsg.includes('rate limit') || errorMsg.includes('api rate limit')) {
+                statusCode = HttpStatus.TOO_MANY_REQUESTS;
+                errorMessage = 'GitHub API rate limit exceeded';
+              } else {
+                statusCode = HttpStatus.FORBIDDEN;
+                errorMessage = 'Access to repository is forbidden';
+              }
+            }
+            // Unauthorized errors
+            else if (errorMsg.includes('401') || 
+                     errorMsg.includes('unauthorized')) {
+              statusCode = HttpStatus.UNAUTHORIZED;
+              errorMessage = 'Unauthorized access to GitHub API';
+            }
+            // Network/fetch errors
+            else if (errorMsg.includes('fetch failed') || 
+                     errorMsg.includes('network') ||
+                     errorMsg.includes('timeout')) {
+              statusCode = HttpStatus.SERVICE_UNAVAILABLE;
+              errorMessage = 'Failed to connect to GitHub API';
+            }
+            // Other errors - keep original message
+            else {
+              errorMessage = `Failed to load repository: ${lastError.message}`;
+            }
+          }
+
+            throw new HttpException(
+              { error: errorMessage },
+              statusCode,
+            );
+          }
+          
+          // If no error but no docs, all branches failed
+          throw new HttpException(
+            { error: 'Unable to determine the default branch for this repository. The repository may be empty or inaccessible.' },
+            HttpStatus.NOT_FOUND,
+          );
         }
 
         // Filter documents to only include README files by checking metadata
@@ -481,32 +448,60 @@ export class GitHubSummarizerService {
         }
       }
 
-      // If it's already an HttpException (like rate limit errors), re-throw it to preserve status code
+      // If it's already an HttpException, re-throw it to preserve status code
       if (error instanceof HttpException) {
         throw error;
       }
 
-      // Provide more helpful error messages for non-HttpException errors
+      // Determine appropriate status code based on error type
       let errorMessage = 'Failed to summarize GitHub repository';
       let statusCode = HttpStatus.INTERNAL_SERVER_ERROR;
-      
+
       if (error instanceof Error) {
-        // Check for rate limit errors
-        const rateLimitInfo = this.rateLimitService.handleRateLimitError(error);
-        if (rateLimitInfo.shouldRetry) {
-          errorMessage = rateLimitInfo.error;
+        const errorMsg = error.message.toLowerCase();
+        
+        // Rate limit errors
+        if (errorMsg.includes('rate limit') || 
+            errorMsg.includes('429') ||
+            errorMsg.includes('too many requests') ||
+            errorMsg.includes('api rate limit')) {
           statusCode = HttpStatus.TOO_MANY_REQUESTS;
-        } else if (error.message.includes('Failed wrap file content')) {
-          // This is a non-critical warning, try to continue
-          errorMessage = 'Some files in the repository could not be processed, but the README should still be available.';
-        } else if (error.message.includes('fetch failed')) {
-          errorMessage = 'Failed to fetch repository from GitHub. Please check that the repository URL is correct and accessible.';
-        } else if (error.message.includes('No commit found for the ref') || 
-                   (error.message.includes('404') && error.message.includes('branch'))) {
-          errorMessage = 'Repository branch not found. The repository may be empty or use a different branch name.';
-        } else if (error.message.includes('404') || error.message.includes('Not Found')) {
-          errorMessage = 'Repository not found. Please check that the GitHub URL is correct and the repository is accessible.';
-        } else {
+          errorMessage = 'GitHub API rate limit exceeded';
+        }
+        // Not found errors
+        else if (errorMsg.includes('404') || 
+                 errorMsg.includes('not found') ||
+                 errorMsg.includes('no commit found')) {
+          statusCode = HttpStatus.NOT_FOUND;
+          errorMessage = 'Repository not found or branch does not exist';
+        }
+        // Forbidden errors (could be rate limit or access denied)
+        else if (errorMsg.includes('403') || 
+                 errorMsg.includes('forbidden')) {
+          // Check if it's a rate limit issue
+          if (errorMsg.includes('rate limit') || errorMsg.includes('api rate limit')) {
+            statusCode = HttpStatus.TOO_MANY_REQUESTS;
+            errorMessage = 'GitHub API rate limit exceeded';
+          } else {
+            statusCode = HttpStatus.FORBIDDEN;
+            errorMessage = 'Access to repository is forbidden';
+          }
+        }
+        // Unauthorized errors
+        else if (errorMsg.includes('401') || 
+                 errorMsg.includes('unauthorized')) {
+          statusCode = HttpStatus.UNAUTHORIZED;
+          errorMessage = 'Unauthorized access to GitHub API';
+        }
+        // Network/fetch errors
+        else if (errorMsg.includes('fetch failed') || 
+                 errorMsg.includes('network') ||
+                 errorMsg.includes('timeout')) {
+          statusCode = HttpStatus.SERVICE_UNAVAILABLE;
+          errorMessage = 'Failed to connect to GitHub API';
+        }
+        // Other errors - keep original message
+        else {
           errorMessage = `Failed to summarize GitHub repository: ${error.message}`;
         }
       }
@@ -518,61 +513,5 @@ export class GitHubSummarizerService {
     }
   }
 
-  /**
-   * Sleep utility for retry delays
-   */
-  private sleep(ms: number): Promise<void> {
-    return new Promise((resolve) => setTimeout(resolve, ms));
-  }
-
-  /**
-   * Detect the default branch of a GitHub repository
-   */
-  private async detectDefaultBranch(owner: string, repo: string): Promise<string | null> {
-    try {
-      const response = await fetch(`https://api.github.com/repos/${owner}/${repo}`, {
-        method: 'GET',
-        headers: {
-          Accept: 'application/vnd.github+json',
-          'X-GitHub-Api-Version': '2022-11-28',
-        },
-      });
-
-      if (!response.ok) {
-        return null;
-      }
-
-      const data = await response.json();
-      return data.default_branch || null;
-    } catch (error) {
-      console.warn(`[GitHub Summarizer] Failed to detect default branch for ${owner}/${repo}:`, error);
-      return null;
-    }
-  }
-
-  /**
-   * Try multiple branch names to find a valid one
-   */
-  private async tryBranches(owner: string, repo: string, branches: string[]): Promise<string | null> {
-    for (const branch of branches) {
-      try {
-        const response = await fetch(`https://api.github.com/repos/${owner}/${repo}/branches/${branch}`, {
-          method: 'GET',
-          headers: {
-            Accept: 'application/vnd.github+json',
-            'X-GitHub-Api-Version': '2022-11-28',
-          },
-        });
-
-        if (response.ok) {
-          return branch;
-        }
-      } catch (error) {
-        // Continue to next branch
-        continue;
-      }
-    }
-    return null;
-  }
 }
 
