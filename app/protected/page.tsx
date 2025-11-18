@@ -5,6 +5,7 @@ import { useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { Toast } from "../dashboards/components/toast";
 import { useToast } from "../dashboards/hooks/use-toast";
+import { ProtectedRoute } from "../components/protected-route";
 import { apiClient } from "@/lib/api-client";
 
 function ProtectedContent() {
@@ -178,18 +179,20 @@ function ProtectedContent() {
 
 export default function ProtectedPage() {
   return (
-    <Suspense
-      fallback={
-        <div className="flex min-h-screen items-center justify-center bg-zinc-50 dark:bg-zinc-950">
-          <div className="text-center">
-            <div className="mb-4 inline-block h-8 w-8 animate-spin rounded-full border-4 border-solid border-purple-600 border-r-transparent"></div>
-            <p className="text-sm text-zinc-600 dark:text-zinc-400">Loading...</p>
+    <ProtectedRoute>
+      <Suspense
+        fallback={
+          <div className="flex min-h-screen items-center justify-center bg-zinc-50 dark:bg-zinc-950">
+            <div className="text-center">
+              <div className="mb-4 inline-block h-8 w-8 animate-spin rounded-full border-4 border-solid border-purple-600 border-r-transparent"></div>
+              <p className="text-sm text-zinc-600 dark:text-zinc-400">Loading...</p>
+            </div>
           </div>
-        </div>
-      }
-    >
-      <ProtectedContent />
-    </Suspense>
+        }
+      >
+        <ProtectedContent />
+      </Suspense>
+    </ProtectedRoute>
   );
 }
 

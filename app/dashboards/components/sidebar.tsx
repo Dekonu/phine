@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useSession, signOut } from "next-auth/react";
 
 interface SidebarProps {
   open: boolean;
@@ -8,6 +9,12 @@ interface SidebarProps {
 }
 
 export function Sidebar({ open, onClose }: SidebarProps) {
+  const { data: session } = useSession();
+
+  const handleSignOut = async () => {
+    await signOut({ callbackUrl: "/" });
+  };
+
   return (
     <>
       <aside
@@ -80,13 +87,44 @@ export function Sidebar({ open, onClose }: SidebarProps) {
           </nav>
 
           {/* User Profile */}
-          <div className="mt-auto flex items-center gap-3 rounded-lg px-3 py-2.5 transition-colors hover:bg-zinc-100 dark:hover:bg-zinc-800">
-            <div className="flex h-8 w-8 items-center justify-center rounded-full bg-gradient-to-br from-purple-400 to-purple-600 text-sm font-semibold text-white">
-              U
+          <div className="mt-auto space-y-2">
+            <div className="flex items-center gap-3 rounded-lg px-3 py-2.5 transition-colors hover:bg-zinc-100 dark:hover:bg-zinc-800">
+              {session?.user?.image ? (
+                <img
+                  src={session.user.image}
+                  alt={session.user.name || "User"}
+                  className="h-8 w-8 rounded-full"
+                />
+              ) : (
+                <div className="flex h-8 w-8 items-center justify-center rounded-full bg-gradient-to-br from-purple-400 to-purple-600 text-sm font-semibold text-white">
+                  {session?.user?.name?.charAt(0).toUpperCase() || session?.user?.email?.charAt(0).toUpperCase() || "U"}
+                </div>
+              )}
+              <div className="flex-1 min-w-0">
+                <p className="text-sm font-medium text-zinc-900 dark:text-zinc-50 truncate">
+                  {session?.user?.name || session?.user?.email || "User"}
+                </p>
+                {session?.user?.email && session?.user?.name && (
+                  <p className="text-xs text-zinc-500 dark:text-zinc-400 truncate">
+                    {session.user.email}
+                  </p>
+                )}
+                {session?.user?.provider && (
+                  <p className="text-xs text-zinc-400 dark:text-zinc-500 capitalize">
+                    via {session.user.provider}
+                  </p>
+                )}
+              </div>
             </div>
-            <div className="flex-1">
-              <p className="text-sm font-medium text-zinc-900 dark:text-zinc-50">User</p>
-            </div>
+            <button
+              onClick={handleSignOut}
+              className="flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium text-zinc-600 transition-colors hover:bg-red-50 hover:text-red-600 dark:text-zinc-400 dark:hover:bg-red-900/20 dark:hover:text-red-400"
+            >
+              <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
+              </svg>
+              Sign Out
+            </button>
           </div>
         </div>
       </aside>

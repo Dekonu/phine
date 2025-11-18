@@ -23,9 +23,16 @@ export function LoginButton() {
               className="h-8 w-8 rounded-full"
             />
           )}
-          <span className="text-sm font-medium text-zinc-700 dark:text-zinc-300">
-            {session.user.name || session.user.email}
-          </span>
+          <div className="flex flex-col">
+            <span className="text-sm font-medium text-zinc-700 dark:text-zinc-300">
+              {session.user.name || session.user.email}
+            </span>
+            {session.user.provider && (
+              <span className="text-xs text-zinc-500 dark:text-zinc-400 capitalize">
+                via {session.user.provider}
+              </span>
+            )}
+          </div>
         </div>
         <Link
           href="/dashboards"

@@ -8,16 +8,18 @@ var __decorate = (this && this.__decorate) || function (decorators, target, key,
 var __metadata = (this && this.__metadata) || function (k, v) {
     if (typeof Reflect === "object" && typeof Reflect.metadata === "function") return Reflect.metadata(k, v);
 };
+var GitHubSummarizerService_1;
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.GitHubSummarizerService = void 0;
 const common_1 = require("@nestjs/common");
 const api_keys_service_1 = require("../api-keys/api-keys.service");
 const github_summarizer_response_schema_1 = require("./schemas/github-summarizer-response.schema");
 const github_cache_service_1 = require("./github-cache.service");
-let GitHubSummarizerService = class GitHubSummarizerService {
+let GitHubSummarizerService = GitHubSummarizerService_1 = class GitHubSummarizerService {
     constructor(apiKeysService, cacheService) {
         this.apiKeysService = apiKeysService;
         this.cacheService = cacheService;
+        this.logger = new common_1.Logger(GitHubSummarizerService_1.name);
         this.githubToken = process.env.GITHUB_PAT || process.env.GITHUB_TOKEN;
         this.openAIApiKey = process.env.OPENAI_API_KEY;
     }
@@ -27,12 +29,18 @@ let GitHubSummarizerService = class GitHubSummarizerService {
         if (!key) {
             throw new common_1.HttpException({ error: 'Invalid API key' }, common_1.HttpStatus.UNAUTHORIZED);
         }
-        const freshKey = await this.apiKeysService.getApiKeyById(key.id);
-        if (!freshKey) {
-            throw new common_1.HttpException({ error: 'API key not found' }, common_1.HttpStatus.UNAUTHORIZED);
+        let freshKey = key;
+        if (key.userId) {
+            const fetchedKey = await this.apiKeysService.getApiKeyById(key.id, key.userId);
+            if (fetchedKey) {
+                freshKey = fetchedKey;
+            }
+            else {
+                this.logger.warn(`Could not fetch fresh key data for key ${key.id}, using cached key`);
+            }
         }
         if (freshKey.key !== originalApiKey) {
-            console.error('[GitHub Summarizer] API key validation error: key mismatch');
+            this.logger.error(`API key validation error: key mismatch for key ${freshKey.id}`);
             throw new common_1.HttpException({ error: 'API key validation error' }, common_1.HttpStatus.INTERNAL_SERVER_ERROR);
         }
         if (freshKey.remainingUses <= 0) {
@@ -45,8 +53,7 @@ let GitHubSummarizerService = class GitHubSummarizerService {
         if (!gitHubUrl || typeof gitHubUrl !== 'string' || gitHubUrl.trim().length === 0) {
             throw new common_1.HttpException({ error: 'gitHubUrl is required in the request body' }, common_1.HttpStatus.BAD_REQUEST);
         }
-        const githubUrlPattern = /^https?:\/\/(www\.)?github\.com\/[\w\-\.]+\/[\w\-\.]+/i;
-        if (!githubUrlPattern.test(gitHubUrl.trim())) {
+        if (!GitHubSummarizerService_1.GITHUB_URL_PATTERN.test(gitHubUrl.trim())) {
             throw new common_1.HttpException({ error: 'Invalid GitHub URL format. Expected format: https://github.com/owner/repo' }, common_1.HttpStatus.BAD_REQUEST);
         }
         let normalizedUrl = gitHubUrl.trim();
@@ -58,7 +65,7 @@ let GitHubSummarizerService = class GitHubSummarizerService {
         }
         const cachedResult = this.cacheService.get(normalizedUrl);
         if (cachedResult) {
-            console.log(`[GitHub Summarizer] Returning cached result for ${normalizedUrl}`);
+            this.logger.log(`Returning cached result for ${normalizedUrl}`);
             return cachedResult;
         }
         let usageConsumed = false;
@@ -85,8 +92,7 @@ let GitHubSummarizerService = class GitHubSummarizerService {
             let lastError = null;
             let rateLimitReset;
             let rateLimitRemaining;
-            const commonBranches = ['main', 'master', 'develop', 'dev', 'trunk'];
-            for (const branch of commonBranches) {
+            for (const branch of GitHubSummarizerService_1.COMMON_BRANCHES) {
                 try {
                     const headers = {
                         Accept: 'application/vnd.github.v3.raw',
@@ -110,10 +116,22 @@ let GitHubSummarizerService = class GitHubSummarizerService {
                         continue;
                     }
                     else if (response.status === 429) {
-                        throw new Error('GitHub API rate limit exceeded');
+                        const errorMsg = 'GitHub API rate limit exceeded';
+                        lastError = new Error(errorMsg);
+                        break;
+                    }
+                    else if (response.status === 403) {
+                        const errorText = await response.text().catch(() => '');
+                        if (errorText.includes('rate limit') || errorText.includes('API rate limit')) {
+                            const errorMsg = 'GitHub API rate limit exceeded';
+                            lastError = new Error(errorMsg);
+                            break;
+                        }
+                        continue;
                     }
                     else {
-                        throw new Error(`GitHub API error: ${response.status}`);
+                        this.logger.warn(`Error fetching README from ${branch} branch for ${owner}/${repo}: ${response.status}`);
+                        continue;
                     }
                 }
                 catch (error) {
@@ -121,29 +139,35 @@ let GitHubSummarizerService = class GitHubSummarizerService {
                     if (lastError.message.includes('rate limit') || lastError.message.includes('429')) {
                         break;
                     }
-                    if (!lastError.message.includes('404')) {
+                    if (!lastError.message.includes('404') && !lastError.message.includes('fetch')) {
                         break;
                     }
                 }
             }
             let docs = [];
             if (!readmeContent) {
-                try {
-                    const loaderOptions = {
-                        branch: 'main',
-                        recursive: false,
-                        unknown: "ignore",
-                        fileGlob: ["README.md"],
-                    };
-                    if (this.githubToken) {
-                        loaderOptions.accessToken = this.githubToken;
+                for (const branch of GitHubSummarizerService_1.COMMON_BRANCHES) {
+                    try {
+                        const loaderOptions = {
+                            branch: branch,
+                            recursive: false,
+                            unknown: "ignore",
+                            fileGlob: ["README.md"],
+                        };
+                        if (this.githubToken) {
+                            loaderOptions.accessToken = this.githubToken;
+                        }
+                        const loader = new GithubRepoLoader(normalizedUrl, loaderOptions);
+                        docs = await loader.load();
+                        if (docs && docs.length > 0) {
+                            break;
+                        }
                     }
-                    const loader = new GithubRepoLoader(normalizedUrl, loaderOptions);
-                    docs = await loader.load();
-                }
-                catch (error) {
-                    if (!lastError) {
-                        lastError = error instanceof Error ? error : new Error(String(error));
+                    catch (error) {
+                        if (!lastError) {
+                            lastError = error instanceof Error ? error : new Error(String(error));
+                        }
+                        continue;
                     }
                 }
             }
@@ -270,19 +294,19 @@ let GitHubSummarizerService = class GitHubSummarizerService {
                     const structuredModel = model.withStructuredOutput(outputSchema, {
                         name: 'GitHubSummarizerResponse',
                     });
-                    const limitedContent = finalReadmeContent.substring(0, 4000);
+                    const limitedContent = finalReadmeContent.substring(0, GitHubSummarizerService_1.README_CONTENT_LIMIT);
                     const prompt = `Extract from this README:
-1. Summary (max 300 chars): What is this project?
+1. Summary (max ${GitHubSummarizerService_1.SUMMARY_MAX_LENGTH} chars): What is this project?
 2. 3-5 cool facts: Key features, tech stack, notable aspects
 
 Rules: Plain text only, no HTML/Markdown/badges/images/links.
 
 README:
-${limitedContent}${finalReadmeContent.length > 4000 ? '...' : ''}`;
+${limitedContent}${finalReadmeContent.length > GitHubSummarizerService_1.README_CONTENT_LIMIT ? '...' : ''}`;
                     const result = await structuredModel.invoke(prompt);
                     const cleanSummary = this.cleanText(result.summary || 'A well-documented project with comprehensive information.');
                     const cleanFacts = (result.coolFacts && result.coolFacts.length > 0
-                        ? result.coolFacts.slice(0, 5).map(fact => this.cleanText(fact))
+                        ? result.coolFacts.slice(0, GitHubSummarizerService_1.MAX_COOL_FACTS).map(fact => this.cleanText(fact))
                         : ['This project has a comprehensive README with detailed documentation.']);
                     extractedInfo = {
                         summary: cleanSummary,
@@ -290,12 +314,12 @@ ${limitedContent}${finalReadmeContent.length > 4000 ? '...' : ''}`;
                     };
                 }
                 catch (error) {
-                    console.error('[GitHub Summarizer] Error using LLM for extraction:', error);
+                    this.logger.error(`Error using LLM for extraction for ${normalizedUrl}:`, error);
                     extractedInfo = this.extractInfoManually(finalReadmeContent);
                 }
             }
             else {
-                console.warn('[GitHub Summarizer] OPENAI_API_KEY not set, using manual extraction');
+                this.logger.warn('OPENAI_API_KEY not set, using manual extraction');
                 extractedInfo = this.extractInfoManually(finalReadmeContent);
             }
             if (!extractedInfo) {
@@ -324,13 +348,13 @@ ${limitedContent}${finalReadmeContent.length > 4000 ? '...' : ''}`;
             return validatedResponse;
         }
         catch (error) {
-            console.error('Error summarizing GitHub repository:', error);
+            this.logger.error(`Error summarizing GitHub repository ${gitHubUrl}:`, error);
             if (usageConsumed) {
                 try {
                     await this.apiKeysService.recordApiUsage(keyIdForUsage, undefined, false);
                 }
                 catch (recordError) {
-                    console.error('Error recording failed usage:', recordError);
+                    this.logger.error(`Error recording failed usage for key ${keyIdForUsage}:`, recordError);
                 }
             }
             if (error instanceof common_1.HttpException) {
@@ -521,7 +545,12 @@ ${limitedContent}${finalReadmeContent.length > 4000 ? '...' : ''}`;
     }
 };
 exports.GitHubSummarizerService = GitHubSummarizerService;
-exports.GitHubSummarizerService = GitHubSummarizerService = __decorate([
+GitHubSummarizerService.COMMON_BRANCHES = ['main', 'master', 'develop', 'dev', 'trunk'];
+GitHubSummarizerService.README_CONTENT_LIMIT = 4000;
+GitHubSummarizerService.SUMMARY_MAX_LENGTH = 300;
+GitHubSummarizerService.MAX_COOL_FACTS = 5;
+GitHubSummarizerService.GITHUB_URL_PATTERN = /^https?:\/\/(www\.)?github\.com\/[\w\-\.]+\/[\w\-\.]+/i;
+exports.GitHubSummarizerService = GitHubSummarizerService = GitHubSummarizerService_1 = __decorate([
     (0, common_1.Injectable)(),
     __metadata("design:paramtypes", [api_keys_service_1.ApiKeysService,
         github_cache_service_1.GitHubCacheService])

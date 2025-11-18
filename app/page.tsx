@@ -1,7 +1,20 @@
-import Link from "next/link";
+"use client";
+
+import { useSession, signIn } from "next-auth/react";
+import { useRouter } from "next/navigation";
 import { LoginButton } from "./components/login-button";
 
 export default function Home() {
+  const { data: session, status } = useSession();
+  const router = useRouter();
+
+  const handleGetStarted = () => {
+    if (session?.user) {
+      router.push("/dashboards");
+    } else {
+      signIn("google");
+    }
+  };
   return (
     <div className="flex h-screen overflow-hidden items-center justify-center bg-gradient-to-br from-zinc-50 via-white to-zinc-100 dark:bg-gradient-to-br dark:from-zinc-950 dark:via-black dark:to-zinc-900">
       <main className="flex h-full w-full max-w-5xl flex-col items-center justify-center px-8 relative">
@@ -65,12 +78,13 @@ export default function Home() {
 
           {/* CTA Buttons */}
           <div className="flex items-center gap-4">
-            <Link
-              className="flex h-12 items-center justify-center rounded-lg bg-gradient-to-r from-purple-600 to-blue-600 px-8 text-sm font-semibold text-white shadow-lg transition-all hover:from-purple-700 hover:to-blue-700 hover:shadow-xl"
-              href="/dashboards"
+            <button
+              onClick={handleGetStarted}
+              disabled={status === "loading"}
+              className="flex h-12 items-center justify-center rounded-lg bg-gradient-to-r from-purple-600 to-blue-600 px-8 text-sm font-semibold text-white shadow-lg transition-all hover:from-purple-700 hover:to-blue-700 hover:shadow-xl disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              Get Started
-            </Link>
+              {status === "loading" ? "Loading..." : "Get Started"}
+            </button>
             <a
               className="flex h-12 items-center justify-center gap-2 rounded-lg border border-zinc-300 bg-white px-6 text-sm font-medium text-zinc-700 transition-all hover:border-zinc-400 hover:bg-zinc-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300 dark:hover:border-zinc-600 dark:hover:bg-zinc-800"
               href="https://github.com/Dekonu/cursor-full-stack-example"

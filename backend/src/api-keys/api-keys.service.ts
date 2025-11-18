@@ -1,13 +1,28 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { SupabaseService } from '../supabase/supabase.service';
 import { ApiKey } from './interfaces/api-key.interface';
+import { ApiKeyDbRow } from './interfaces/db-row.interface';
 
+/**
+ * Service for managing API keys
+ */
 @Injectable()
 export class ApiKeysService {
+  private readonly logger = new Logger(ApiKeysService.name);
+  private static readonly DEFAULT_USAGE_COUNT = 1000;
+  private static readonly API_KEY_PREFIX = 'sk_live_';
+  private static readonly API_KEY_BYTES = 32;
+  private static readonly MASK_PREFIX_LENGTH = 8;
+  private static readonly MASK_SUFFIX_LENGTH = 4;
+
   constructor(private supabaseService: SupabaseService) {}
 
+  /**
+   * Generates a cryptographically secure API key
+   * @returns A new API key with format: sk_live_<64-char-hex>
+   */
   private generateSecureApiKey(): string {
-    const randomBytes = new Uint8Array(32);
+    const randomBytes = new Uint8Array(ApiKeysService.API_KEY_BYTES);
     if (typeof crypto !== 'undefined' && crypto.getRandomValues) {
       crypto.getRandomValues(randomBytes);
     } else {
@@ -18,30 +33,51 @@ export class ApiKeysService {
       .map((byte) => byte.toString(16).padStart(2, '0'))
       .join('');
 
-    return `sk_live_${hexString}`;
+    return `${ApiKeysService.API_KEY_PREFIX}${hexString}`;
   }
 
+  /**
+   * Masks an API key for display purposes
+   * Shows first 8 and last 4 characters, masks the rest
+   * @param key - The API key to mask
+   * @returns Masked API key string
+   */
   private maskApiKey(key: string): string {
-    if (key.length <= 12) return '•'.repeat(key.length);
-    const prefix = key.substring(0, 8);
-    const suffix = key.substring(key.length - 4);
-    const masked = '•'.repeat(key.length - 12);
+    const minLength = ApiKeysService.MASK_PREFIX_LENGTH + ApiKeysService.MASK_SUFFIX_LENGTH;
+    if (key.length <= minLength) return '•'.repeat(key.length);
+    
+    const prefix = key.substring(0, ApiKeysService.MASK_PREFIX_LENGTH);
+    const suffix = key.substring(key.length - ApiKeysService.MASK_SUFFIX_LENGTH);
+    const masked = '•'.repeat(key.length - minLength);
     return `${prefix}${masked}${suffix}`;
   }
 
-  private dbRowToApiKey(row: any): ApiKey {
+  /**
+   * Converts a database row to an ApiKey interface
+   * @param row - Database row from Supabase
+   * @returns ApiKey object
+   */
+  private dbRowToApiKey(row: ApiKeyDbRow): ApiKey {
     return {
       id: row.id,
       name: row.name,
       key: row.key,
       createdAt: row.created_at || row.created_at_iso || new Date(row.created_at).toISOString(),
       lastUsed: row.last_used ? new Date(row.last_used).toISOString() : undefined,
-      usageCount: row.usage_count || 1000,
+      usageCount: row.usage_count || ApiKeysService.DEFAULT_USAGE_COUNT,
       remainingUses:
-        row.remaining_uses !== undefined ? row.remaining_uses : row.usage_count || 1000,
+        row.remaining_uses !== undefined 
+          ? row.remaining_uses 
+          : row.usage_count || ApiKeysService.DEFAULT_USAGE_COUNT,
+      userId: row.user_id,
     };
   }
 
+  /**
+   * Gets the actual usage count for an API key from the api_usage table
+   * @param keyId - The API key ID
+   * @returns The number of times the key has been used
+   */
   private async getActualUsageCount(keyId: string): Promise<number> {
     try {
       const { count, error } = await this.supabaseService
@@ -51,28 +87,33 @@ export class ApiKeysService {
         .eq('key_id', keyId);
 
       if (error) {
-        console.error('Error getting usage count:', error);
+        this.logger.error(`Error getting usage count for key ${keyId}:`, error);
         return 0;
       }
 
       return count || 0;
     } catch (error) {
-      console.error('Failed to get actual usage count:', error);
+      this.logger.error(`Failed to get actual usage count for key ${keyId}:`, error);
       return 0;
     }
   }
 
-  async getAllApiKeys(): Promise<ApiKey[]> {
+  /**
+   * Retrieves all API keys for a specific user
+   * @param userId - The user ID to filter by
+   * @returns Array of API keys (with masked keys)
+   */
+  async getAllApiKeys(userId: string): Promise<ApiKey[]> {
     try {
-      // Fetch fresh data from database - ensure we get current remaining_uses
       const { data, error } = await this.supabaseService
         .getClient()
         .from('api_keys')
         .select('*')
+        .eq('user_id', userId)
         .order('created_at', { ascending: false });
 
       if (error) {
-        console.error('Error fetching API keys:', error);
+        this.logger.error(`Error fetching API keys for user ${userId}:`, error);
         throw error;
       }
 
@@ -81,13 +122,14 @@ export class ApiKeysService {
           const apiKey = this.dbRowToApiKey(row);
           const actualUsage = await this.getActualUsageCount(apiKey.id);
           
-          // Ensure remainingUses is from the fresh database row
-          const remainingUses = row.remaining_uses !== undefined ? row.remaining_uses : apiKey.usageCount;
+          const remainingUses = row.remaining_uses !== undefined 
+            ? row.remaining_uses 
+            : apiKey.usageCount;
           
           return {
             ...apiKey,
             key: this.maskApiKey(apiKey.key),
-            remainingUses, // Use fresh value from database
+            remainingUses,
             actualUsage,
           };
         }),
@@ -95,25 +137,32 @@ export class ApiKeysService {
 
       return keysWithUsage;
     } catch (error) {
-      console.error('Failed to get all API keys:', error);
+      this.logger.error(`Failed to get all API keys for user ${userId}:`, error);
       return [];
     }
   }
 
-  async getApiKeyById(id: string): Promise<ApiKey | undefined> {
+  /**
+   * Retrieves a specific API key by ID (ensures it belongs to the user)
+   * @param id - The API key ID
+   * @param userId - The user ID to verify ownership
+   * @returns The API key or undefined if not found
+   */
+  async getApiKeyById(id: string, userId: string): Promise<ApiKey | undefined> {
     try {
       const { data, error } = await this.supabaseService
         .getClient()
         .from('api_keys')
         .select('*')
         .eq('id', id)
+        .eq('user_id', userId)
         .single();
 
       if (error) {
         if (error.code === 'PGRST116') {
           return undefined;
         }
-        console.error('Error fetching API key by ID:', error);
+        this.logger.error(`Error fetching API key ${id} for user ${userId}:`, error);
         throw error;
       }
 
@@ -127,11 +176,16 @@ export class ApiKeysService {
         actualUsage,
       };
     } catch (error) {
-      console.error('Failed to get API key by ID:', error);
+      this.logger.error(`Failed to get API key ${id} for user ${userId}:`, error);
       return undefined;
     }
   }
 
+  /**
+   * Retrieves an API key by its key string (for validation purposes)
+   * @param keyString - The API key string to look up
+   * @returns The API key or undefined if not found
+   */
   async getApiKeyByKey(keyString: string): Promise<ApiKey | undefined> {
     try {
       const { data, error } = await this.supabaseService
@@ -145,7 +199,7 @@ export class ApiKeysService {
         if (error.code === 'PGRST116') {
           return undefined;
         }
-        console.error('Error fetching API key by key:', error);
+        this.logger.error('Error fetching API key by key string:', error);
         throw error;
       }
 
@@ -153,12 +207,19 @@ export class ApiKeysService {
 
       return this.dbRowToApiKey(data);
     } catch (error) {
-      console.error('Failed to get API key by key:', error);
+      this.logger.error('Failed to get API key by key string:', error);
       return undefined;
     }
   }
 
-  async createApiKey(name: string): Promise<ApiKey> {
+  /**
+   * Creates a new API key for a user
+   * @param name - The name/label for the API key
+   * @param userId - The user ID who owns this key
+   * @returns The newly created API key
+   * @throws Error if creation fails
+   */
+  async createApiKey(name: string, userId: string): Promise<ApiKey> {
     try {
       const generatedKey = this.generateSecureApiKey();
       const now = new Date().toISOString();
@@ -169,15 +230,16 @@ export class ApiKeysService {
         .insert({
           name,
           key: generatedKey,
+          user_id: userId,
           created_at: now,
-          usage_count: 1000,
-          remaining_uses: 1000,
+          usage_count: ApiKeysService.DEFAULT_USAGE_COUNT,
+          remaining_uses: ApiKeysService.DEFAULT_USAGE_COUNT,
         })
         .select()
         .single();
 
       if (error) {
-        console.error('Error creating API key:', error);
+        this.logger.error(`Error creating API key for user ${userId}:`, error);
         throw error;
       }
 
@@ -185,20 +247,29 @@ export class ApiKeysService {
         throw new Error('Failed to create API key: no data returned');
       }
 
+      this.logger.log(`API key created successfully for user ${userId}: ${data.id}`);
       return this.dbRowToApiKey(data);
     } catch (error) {
-      console.error('Failed to create API key:', error);
+      this.logger.error(`Failed to create API key for user ${userId}:`, error);
       throw error;
     }
   }
 
-  async updateApiKey(id: string, name: string): Promise<ApiKey | null> {
+  /**
+   * Updates an API key's name
+   * @param id - The API key ID
+   * @param name - The new name for the key
+   * @param userId - The user ID to verify ownership
+   * @returns The updated API key or null if not found
+   */
+  async updateApiKey(id: string, name: string, userId: string): Promise<ApiKey | null> {
     try {
       const { data, error } = await this.supabaseService
         .getClient()
         .from('api_keys')
         .update({ name })
         .eq('id', id)
+        .eq('user_id', userId)
         .select()
         .single();
 
@@ -206,21 +277,29 @@ export class ApiKeysService {
         if (error.code === 'PGRST116') {
           return null;
         }
-        console.error('Error updating API key:', error);
+        this.logger.error(`Error updating API key ${id} for user ${userId}:`, error);
         throw error;
       }
 
       if (!data) return null;
 
+      this.logger.log(`API key ${id} updated successfully for user ${userId}`);
       return this.dbRowToApiKey(data);
     } catch (error) {
-      console.error('Failed to update API key:', error);
+      this.logger.error(`Failed to update API key ${id} for user ${userId}:`, error);
       return null;
     }
   }
 
-  async deleteApiKey(id: string): Promise<boolean> {
+  /**
+   * Deletes an API key and all its usage records
+   * @param id - The API key ID
+   * @param userId - The user ID to verify ownership
+   * @returns true if deleted successfully, false otherwise
+   */
+  async deleteApiKey(id: string, userId: string): Promise<boolean> {
     try {
+      // Delete all usage records first (cascade should handle this, but being explicit)
       await this.supabaseService
         .getClient()
         .from('api_usage')
@@ -231,23 +310,31 @@ export class ApiKeysService {
         .getClient()
         .from('api_keys')
         .delete()
-        .eq('id', id);
+        .eq('id', id)
+        .eq('user_id', userId);
 
       if (error) {
         if (error.code === 'PGRST116') {
           return false;
         }
-        console.error('Error deleting API key:', error);
+        this.logger.error(`Error deleting API key ${id} for user ${userId}:`, error);
         throw error;
       }
 
+      this.logger.log(`API key ${id} deleted successfully for user ${userId}`);
       return true;
     } catch (error) {
-      console.error('Failed to delete API key:', error);
+      this.logger.error(`Failed to delete API key ${id} for user ${userId}:`, error);
       return false;
     }
   }
 
+  /**
+   * Checks if an API key has remaining uses and atomically consumes one
+   * Uses database-level constraints to prevent race conditions
+   * @param keyId - The API key ID
+   * @returns true if usage was consumed, false if no remaining uses
+   */
   async checkAndConsumeUsage(keyId: string): Promise<boolean> {
     try {
       const { data, error: fetchError } = await this.supabaseService
@@ -258,13 +345,14 @@ export class ApiKeysService {
         .single();
 
       if (fetchError || !data) {
-        console.error('Error fetching API key for usage check:', fetchError);
+        this.logger.error(`Error fetching API key ${keyId} for usage check:`, fetchError);
         return false;
       }
 
       const currentRemaining = data.remaining_uses || 0;
 
       if (currentRemaining <= 0) {
+        this.logger.warn(`API key ${keyId} has no remaining uses`);
         return false;
       }
 
@@ -283,24 +371,30 @@ export class ApiKeysService {
 
       if (!updateData || updateError) {
         if (updateError) {
-          console.error('Error updating remaining uses:', updateError);
+          this.logger.error(`Error updating remaining uses for key ${keyId}:`, updateError);
         }
         return false;
       }
 
       // Verify the key ID matches what we intended to update
       if (updateData.id !== keyId) {
-        console.error('Critical error: Updated wrong key ID');
+        this.logger.error(`Critical error: Updated wrong key ID. Expected ${keyId}, got ${updateData.id}`);
         return false;
       }
 
       return true;
     } catch (error) {
-      console.error('Failed to check and consume usage:', error);
+      this.logger.error(`Failed to check and consume usage for key ${keyId}:`, error);
       return false;
     }
   }
 
+  /**
+   * Records API usage for analytics
+   * @param keyId - The API key ID
+   * @param responseTime - Optional response time in milliseconds
+   * @param success - Whether the request was successful
+   */
   async recordApiUsage(
     keyId: string,
     responseTime?: number,
@@ -318,11 +412,11 @@ export class ApiKeysService {
         });
 
       if (usageError) {
-        console.error('Error recording API usage:', usageError);
+        this.logger.error(`Error recording API usage for key ${keyId}:`, usageError);
         return;
       }
     } catch (error) {
-      console.error('Failed to record API usage:', error);
+      this.logger.error(`Failed to record API usage for key ${keyId}:`, error);
     }
   }
 }

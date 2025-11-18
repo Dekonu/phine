@@ -21,9 +21,14 @@ export interface ApiMetrics {
 
 class ApiClient {
   private baseUrl: string;
+  private userId: string | null = null;
 
   constructor() {
     this.baseUrl = API_BASE_URL;
+  }
+
+  setUserId(userId: string | null) {
+    this.userId = userId;
   }
 
   private async request<T>(
@@ -32,13 +37,20 @@ class ApiClient {
   ): Promise<T> {
     const url = `${this.baseUrl}${endpoint}`;
     
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      ...(options.headers as Record<string, string>),
+    };
+
+    // Add user ID header if available
+    if (this.userId) {
+      headers['X-User-ID'] = this.userId;
+    }
+    
     try {
       const response = await fetch(url, {
         ...options,
-        headers: {
-          'Content-Type': 'application/json',
-          ...options.headers,
-        },
+        headers,
       });
 
       if (!response.ok) {
@@ -134,5 +146,6 @@ class ApiClient {
   }
 }
 
-export const apiClient = new ApiClient();
-
+// Export the apiClient instance
+const apiClient = new ApiClient();
+export { apiClient };

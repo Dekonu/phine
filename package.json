@@ -8,7 +8,8 @@
     "start": "next start",
     "lint": "eslint",
     "dev:backend": "cd backend && yarn start:dev",
-    "dev:all": "concurrently \"yarn dev\" \"yarn dev:backend\""
+    "dev:all": "concurrently \"yarn dev\" \"yarn dev:backend\"",
+    "check:oauth": "node scripts/check-oauth-config.js"
   },
   "dependencies": {
     "@langchain/community": "^1.0.0",

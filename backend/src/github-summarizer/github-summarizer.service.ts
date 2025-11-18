@@ -1,4 +1,4 @@
-import { Injectable, HttpException, HttpStatus } from '@nestjs/common';
+import { Injectable, HttpException, HttpStatus, Logger } from '@nestjs/common';
 import { ApiKeysService } from '../api-keys/api-keys.service';
 import {
   GitHubSummarizerResponseSchema,
@@ -6,22 +6,38 @@ import {
 } from './schemas/github-summarizer-response.schema';
 import { GitHubCacheService } from './github-cache.service';
 
+/**
+ * Service for summarizing GitHub repositories using OpenAI and LangChain
+ */
 @Injectable()
 export class GitHubSummarizerService {
+  private readonly logger = new Logger(GitHubSummarizerService.name);
   private readonly githubToken: string | undefined;
   private readonly openAIApiKey: string | undefined;
+
+  // Constants for branch detection
+  private static readonly COMMON_BRANCHES = ['main', 'master', 'develop', 'dev', 'trunk'];
+  private static readonly README_CONTENT_LIMIT = 4000;
+  private static readonly SUMMARY_MAX_LENGTH = 300;
+  private static readonly MAX_COOL_FACTS = 5;
+  private static readonly GITHUB_URL_PATTERN = /^https?:\/\/(www\.)?github\.com\/[\w\-\.]+\/[\w\-\.]+/i;
 
   constructor(
     private readonly apiKeysService: ApiKeysService,
     private readonly cacheService: GitHubCacheService,
   ) {
-    // Get GitHub PAT from environment variables
     this.githubToken = process.env.GITHUB_PAT || process.env.GITHUB_TOKEN;
-    // Get OpenAI API key from environment variables
     this.openAIApiKey = process.env.OPENAI_API_KEY;
   }
 
-  async processRequest(apiKey: string, gitHubUrl: string) {
+  /**
+   * Processes a GitHub repository summarization request
+   * @param apiKey - The API key for authentication
+   * @param gitHubUrl - The GitHub repository URL to summarize
+   * @returns A validated GitHub summarizer response
+   * @throws HttpException if validation fails or processing errors occur
+   */
+  async processRequest(apiKey: string, gitHubUrl: string): Promise<GitHubSummarizerResponse> {
     const originalApiKey = apiKey.trim();
 
     // Validate API key against database
@@ -32,14 +48,20 @@ export class GitHubSummarizerService {
     }
 
     // Fetch fresh data from database to ensure we have current remaining uses
-    const freshKey = await this.apiKeysService.getApiKeyById(key.id);
-    if (!freshKey) {
-      throw new HttpException({ error: 'API key not found' }, HttpStatus.UNAUTHORIZED);
+    // Use the userId from the key if available
+    let freshKey = key;
+    if (key.userId) {
+      const fetchedKey = await this.apiKeysService.getApiKeyById(key.id, key.userId);
+      if (fetchedKey) {
+        freshKey = fetchedKey;
+      } else {
+        this.logger.warn(`Could not fetch fresh key data for key ${key.id}, using cached key`);
+      }
     }
 
     // Verify key string matches (safety check)
     if (freshKey.key !== originalApiKey) {
-      console.error('[GitHub Summarizer] API key validation error: key mismatch');
+      this.logger.error(`API key validation error: key mismatch for key ${freshKey.id}`);
       throw new HttpException({ error: 'API key validation error' }, HttpStatus.INTERNAL_SERVER_ERROR);
     }
 
@@ -63,8 +85,7 @@ export class GitHubSummarizerService {
     }
 
     // Validate GitHub URL format
-    const githubUrlPattern = /^https?:\/\/(www\.)?github\.com\/[\w\-\.]+\/[\w\-\.]+/i;
-    if (!githubUrlPattern.test(gitHubUrl.trim())) {
+    if (!GitHubSummarizerService.GITHUB_URL_PATTERN.test(gitHubUrl.trim())) {
       throw new HttpException(
         { error: 'Invalid GitHub URL format. Expected format: https://github.com/owner/repo' },
         HttpStatus.BAD_REQUEST,
@@ -83,7 +104,7 @@ export class GitHubSummarizerService {
     // Check cache first
     const cachedResult = this.cacheService.get(normalizedUrl);
     if (cachedResult) {
-      console.log(`[GitHub Summarizer] Returning cached result for ${normalizedUrl}`);
+      this.logger.log(`Returning cached result for ${normalizedUrl}`);
       return cachedResult;
     }
 
@@ -129,8 +150,7 @@ export class GitHubSummarizerService {
         let rateLimitRemaining: number | undefined;
 
         // Try to get README directly from GitHub API (faster than loading entire repo)
-        const commonBranches = ['main', 'master', 'develop', 'dev', 'trunk'];
-        for (const branch of commonBranches) {
+        for (const branch of GitHubSummarizerService.COMMON_BRANCHES) {
           try {
             const headers: Record<string, string> = {
               Accept: 'application/vnd.github.v3.raw',
@@ -154,54 +174,91 @@ export class GitHubSummarizerService {
 
             if (response.ok) {
               readmeContent = await response.text();
-              break; // Success
+              break; // Success - found README on this branch
             } else if (response.status === 404) {
-              continue; // Try next branch
+              // README not found on this branch, try next branch
+              continue;
             } else if (response.status === 429) {
-              throw new Error('GitHub API rate limit exceeded');
+              const errorMsg = 'GitHub API rate limit exceeded';
+              lastError = new Error(errorMsg);
+              break; // Stop trying branches on rate limit
+            } else if (response.status === 403) {
+              // Forbidden - might be rate limit or access issue
+              const errorText = await response.text().catch(() => '');
+              if (errorText.includes('rate limit') || errorText.includes('API rate limit')) {
+                const errorMsg = 'GitHub API rate limit exceeded';
+                lastError = new Error(errorMsg);
+                break;
+              }
+              // Otherwise, continue to next branch
+              continue;
             } else {
-              throw new Error(`GitHub API error: ${response.status}`);
+              // Other error - log but continue to next branch
+              this.logger.warn(`Error fetching README from ${branch} branch for ${owner}/${repo}: ${response.status}`);
+              continue;
             }
           } catch (error) {
             lastError = error instanceof Error ? error : new Error(String(error));
             if (lastError.message.includes('rate limit') || lastError.message.includes('429')) {
               break; // Stop trying branches on rate limit
             }
-            // Continue to next branch for 404 errors
-            if (!lastError.message.includes('404')) {
+            // Continue to next branch for 404 errors or network errors
+            if (!lastError.message.includes('404') && !lastError.message.includes('fetch')) {
               break;
             }
           }
         }
 
         // Fallback to LangChain loader if direct API fetch failed
-        let docs: any[] = [];
+        interface LoaderOptions {
+          branch: string;
+          recursive: boolean;
+          unknown: string;
+          fileGlob: string[];
+          accessToken?: string;
+        }
+
+        let docs: Array<{ pageContent: string; metadata?: { source?: string } }> = [];
         if (!readmeContent) {
-          try {
-            // Build loader options - non-recursive for speed, only root README
-            const loaderOptions: any = {
-              branch: 'main', // Try main first
-              recursive: false, // Don't recurse - much faster
-              unknown: "ignore",
-              fileGlob: ["README.md"], // Only root README
-            };
+          // Try each branch with the loader
+          for (const branch of GitHubSummarizerService.COMMON_BRANCHES) {
+            try {
+              // Build loader options - non-recursive for speed, only root README
+              const loaderOptions: LoaderOptions = {
+                branch: branch,
+                recursive: false,
+                unknown: "ignore",
+                fileGlob: ["README.md"],
+              };
 
-            if (this.githubToken) {
-              loaderOptions.accessToken = this.githubToken;
-            }
+              if (this.githubToken) {
+                loaderOptions.accessToken = this.githubToken;
+              }
 
-            const loader = new GithubRepoLoader(normalizedUrl, loaderOptions);
-            docs = await loader.load();
-          } catch (error) {
-            // If loader also fails, we'll handle it below
-            if (!lastError) {
-              lastError = error instanceof Error ? error : new Error(String(error));
+              const loader = new GithubRepoLoader(normalizedUrl, loaderOptions);
+              docs = await loader.load();
+              
+              // If we got docs, break out of the loop
+              if (docs && docs.length > 0) {
+                break;
+              }
+            } catch (error) {
+              // If loader fails, continue to next branch
+              if (!lastError) {
+                lastError = error instanceof Error ? error : new Error(String(error));
+              }
+              // Continue to next branch
+              continue;
             }
           }
         }
 
         // Process the README content
-        let readmeDocs: any[] = [];
+        interface ReadmeDoc {
+          pageContent: string;
+          metadata?: { source?: string };
+        }
+        let readmeDocs: ReadmeDoc[] = [];
         
         if (readmeContent) {
           // Create a document from the direct API fetch
@@ -225,7 +282,13 @@ export class GitHubSummarizerService {
             // Determine appropriate status code based on error type
             let errorMessage = 'Failed to load repository from GitHub';
             let statusCode = HttpStatus.INTERNAL_SERVER_ERROR;
-            const errorResponse: any = { error: errorMessage };
+            interface ErrorResponse {
+              error: string;
+              rateLimitReset?: string;
+              waitTimeSeconds?: number;
+              rateLimitRemaining?: number;
+            }
+            const errorResponse: ErrorResponse = { error: errorMessage };
 
             if (lastError instanceof Error) {
               const errorMsg = lastError.message.toLowerCase();
@@ -369,18 +432,18 @@ export class GitHubSummarizerService {
               name: 'GitHubSummarizerResponse',
             });
 
-            // Limit content to first 4000 chars for faster processing (most READMEs have key info at top)
-            const limitedContent = finalReadmeContent.substring(0, 4000);
+            // Limit content for faster processing (most READMEs have key info at top)
+            const limitedContent = finalReadmeContent.substring(0, GitHubSummarizerService.README_CONTENT_LIMIT);
             
             // Create concise prompt for faster LLM response
             const prompt = `Extract from this README:
-1. Summary (max 300 chars): What is this project?
+1. Summary (max ${GitHubSummarizerService.SUMMARY_MAX_LENGTH} chars): What is this project?
 2. 3-5 cool facts: Key features, tech stack, notable aspects
 
 Rules: Plain text only, no HTML/Markdown/badges/images/links.
 
 README:
-${limitedContent}${finalReadmeContent.length > 4000 ? '...' : ''}`;
+${limitedContent}${finalReadmeContent.length > GitHubSummarizerService.README_CONTENT_LIMIT ? '...' : ''}`;
 
             // Invoke the model with structured output
             const result = await structuredModel.invoke(prompt);
@@ -388,7 +451,7 @@ ${limitedContent}${finalReadmeContent.length > 4000 ? '...' : ''}`;
             // Clean HTML/Markdown tags from the results
             const cleanSummary = this.cleanText(result.summary || 'A well-documented project with comprehensive information.');
             const cleanFacts = (result.coolFacts && result.coolFacts.length > 0 
-              ? result.coolFacts.slice(0, 5).map(fact => this.cleanText(fact))
+              ? result.coolFacts.slice(0, GitHubSummarizerService.MAX_COOL_FACTS).map(fact => this.cleanText(fact))
               : ['This project has a comprehensive README with detailed documentation.']);
 
             extractedInfo = {
@@ -396,13 +459,13 @@ ${limitedContent}${finalReadmeContent.length > 4000 ? '...' : ''}`;
               coolFacts: cleanFacts,
             };
           } catch (error) {
-            console.error('[GitHub Summarizer] Error using LLM for extraction:', error);
+            this.logger.error(`Error using LLM for extraction for ${normalizedUrl}:`, error);
             // Fall back to manual extraction if LLM fails
             extractedInfo = this.extractInfoManually(finalReadmeContent);
           }
         } else {
           // Fall back to manual extraction if no OpenAI API key
-          console.warn('[GitHub Summarizer] OPENAI_API_KEY not set, using manual extraction');
+          this.logger.warn('OPENAI_API_KEY not set, using manual extraction');
           extractedInfo = this.extractInfoManually(finalReadmeContent);
         }
 
@@ -448,14 +511,14 @@ ${limitedContent}${finalReadmeContent.length > 4000 ? '...' : ''}`;
 
       return validatedResponse;
     } catch (error) {
-      console.error('Error summarizing GitHub repository:', error);
+      this.logger.error(`Error summarizing GitHub repository ${gitHubUrl}:`, error);
       
       // If usage was consumed but request failed, record it as a failed request
       if (usageConsumed) {
         try {
           await this.apiKeysService.recordApiUsage(keyIdForUsage, undefined, false);
         } catch (recordError) {
-          console.error('Error recording failed usage:', recordError);
+          this.logger.error(`Error recording failed usage for key ${keyIdForUsage}:`, recordError);
         }
       }
 

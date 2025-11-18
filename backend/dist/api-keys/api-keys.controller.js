@@ -17,15 +17,17 @@ const common_1 = require("@nestjs/common");
 const api_keys_service_1 = require("./api-keys.service");
 const create_api_key_dto_1 = require("./dto/create-api-key.dto");
 const update_api_key_dto_1 = require("./dto/update-api-key.dto");
+const user_auth_guard_1 = require("../common/guards/user-auth.guard");
+const user_id_decorator_1 = require("../common/decorators/user-id.decorator");
 let ApiKeysController = class ApiKeysController {
     constructor(apiKeysService) {
         this.apiKeysService = apiKeysService;
     }
-    async getAllApiKeys() {
-        return this.apiKeysService.getAllApiKeys();
+    async getAllApiKeys(userId) {
+        return this.apiKeysService.getAllApiKeys(userId);
     }
-    async getApiKeyById(id) {
-        const apiKey = await this.apiKeysService.getApiKeyById(id);
+    async getApiKeyById(id, userId) {
+        const apiKey = await this.apiKeysService.getApiKeyById(id, userId);
         if (!apiKey) {
             throw new common_1.HttpException({ error: 'API key not found' }, common_1.HttpStatus.NOT_FOUND);
         }
@@ -36,8 +38,8 @@ let ApiKeysController = class ApiKeysController {
                 apiKey.key.substring(apiKey.key.length - 4),
         };
     }
-    async revealApiKey(id) {
-        const apiKey = await this.apiKeysService.getApiKeyById(id);
+    async revealApiKey(id, userId) {
+        const apiKey = await this.apiKeysService.getApiKeyById(id, userId);
         if (!apiKey) {
             throw new common_1.HttpException({ error: 'API key not found' }, common_1.HttpStatus.NOT_FOUND);
         }
@@ -46,13 +48,13 @@ let ApiKeysController = class ApiKeysController {
             key: apiKey.key,
         };
     }
-    async createApiKey(createApiKeyDto) {
+    async createApiKey(createApiKeyDto, userId) {
         const { name } = createApiKeyDto;
         if (!name || typeof name !== 'string' || name.trim().length === 0) {
             throw new common_1.HttpException({ error: 'Name is required and must be a non-empty string' }, common_1.HttpStatus.BAD_REQUEST);
         }
         try {
-            const newApiKey = await this.apiKeysService.createApiKey(name.trim());
+            const newApiKey = await this.apiKeysService.createApiKey(name.trim(), userId);
             return newApiKey;
         }
         catch (error) {
@@ -60,13 +62,13 @@ let ApiKeysController = class ApiKeysController {
             throw new common_1.HttpException({ error: 'Failed to create API key' }, common_1.HttpStatus.INTERNAL_SERVER_ERROR);
         }
     }
-    async updateApiKey(id, updateApiKeyDto) {
+    async updateApiKey(id, updateApiKeyDto, userId) {
         const { name } = updateApiKeyDto;
         if (!name || typeof name !== 'string' || name.trim().length === 0) {
             throw new common_1.HttpException({ error: 'Name is required and must be a non-empty string' }, common_1.HttpStatus.BAD_REQUEST);
         }
         try {
-            const updatedKey = await this.apiKeysService.updateApiKey(id, name.trim());
+            const updatedKey = await this.apiKeysService.updateApiKey(id, name.trim(), userId);
             if (!updatedKey) {
                 throw new common_1.HttpException({ error: 'API key not found' }, common_1.HttpStatus.NOT_FOUND);
             }
@@ -84,9 +86,9 @@ let ApiKeysController = class ApiKeysController {
             throw new common_1.HttpException({ error: 'Failed to update API key' }, common_1.HttpStatus.INTERNAL_SERVER_ERROR);
         }
     }
-    async deleteApiKey(id) {
+    async deleteApiKey(id, userId) {
         try {
-            const deleted = await this.apiKeysService.deleteApiKey(id);
+            const deleted = await this.apiKeysService.deleteApiKey(id, userId);
             if (!deleted) {
                 throw new common_1.HttpException({ error: 'API key not found' }, common_1.HttpStatus.NOT_FOUND);
             }
@@ -103,49 +105,56 @@ let ApiKeysController = class ApiKeysController {
 exports.ApiKeysController = ApiKeysController;
 __decorate([
     (0, common_1.Get)(),
+    __param(0, (0, user_id_decorator_1.UserId)()),
     __metadata("design:type", Function),
-    __metadata("design:paramtypes", []),
+    __metadata("design:paramtypes", [String]),
     __metadata("design:returntype", Promise)
 ], ApiKeysController.prototype, "getAllApiKeys", null);
 __decorate([
     (0, common_1.Get)(':id'),
     __param(0, (0, common_1.Param)('id')),
+    __param(1, (0, user_id_decorator_1.UserId)()),
     __metadata("design:type", Function),
-    __metadata("design:paramtypes", [String]),
+    __metadata("design:paramtypes", [String, String]),
     __metadata("design:returntype", Promise)
 ], ApiKeysController.prototype, "getApiKeyById", null);
 __decorate([
     (0, common_1.Get)(':id/reveal'),
     __param(0, (0, common_1.Param)('id')),
+    __param(1, (0, user_id_decorator_1.UserId)()),
     __metadata("design:type", Function),
-    __metadata("design:paramtypes", [String]),
+    __metadata("design:paramtypes", [String, String]),
     __metadata("design:returntype", Promise)
 ], ApiKeysController.prototype, "revealApiKey", null);
 __decorate([
     (0, common_1.Post)(),
     (0, common_1.HttpCode)(common_1.HttpStatus.CREATED),
     __param(0, (0, common_1.Body)()),
+    __param(1, (0, user_id_decorator_1.UserId)()),
     __metadata("design:type", Function),
-    __metadata("design:paramtypes", [create_api_key_dto_1.CreateApiKeyDto]),
+    __metadata("design:paramtypes", [create_api_key_dto_1.CreateApiKeyDto, String]),
     __metadata("design:returntype", Promise)
 ], ApiKeysController.prototype, "createApiKey", null);
 __decorate([
     (0, common_1.Put)(':id'),
     __param(0, (0, common_1.Param)('id')),
     __param(1, (0, common_1.Body)()),
+    __param(2, (0, user_id_decorator_1.UserId)()),
     __metadata("design:type", Function),
-    __metadata("design:paramtypes", [String, update_api_key_dto_1.UpdateApiKeyDto]),
+    __metadata("design:paramtypes", [String, update_api_key_dto_1.UpdateApiKeyDto, String]),
     __metadata("design:returntype", Promise)
 ], ApiKeysController.prototype, "updateApiKey", null);
 __decorate([
     (0, common_1.Delete)(':id'),
     __param(0, (0, common_1.Param)('id')),
+    __param(1, (0, user_id_decorator_1.UserId)()),
     __metadata("design:type", Function),
-    __metadata("design:paramtypes", [String]),
+    __metadata("design:paramtypes", [String, String]),
     __metadata("design:returntype", Promise)
 ], ApiKeysController.prototype, "deleteApiKey", null);
 exports.ApiKeysController = ApiKeysController = __decorate([
     (0, common_1.Controller)('api-keys'),
+    (0, common_1.UseGuards)(user_auth_guard_1.UserAuthGuard),
     __metadata("design:paramtypes", [api_keys_service_1.ApiKeysService])
 ], ApiKeysController);
 //# sourceMappingURL=api-keys.controller.js.map

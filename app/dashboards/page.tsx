@@ -14,9 +14,10 @@ import { ShowKeyModal } from "./components/modals/show-key-modal";
 import { useApiKeys } from "./hooks/use-api-keys";
 import { useMetrics } from "./hooks/use-metrics";
 import { useToast } from "./hooks/use-toast";
+import { ProtectedRoute } from "../components/protected-route";
 import type { TimeRange } from "./types";
 
-export default function DashboardsPage() {
+function DashboardsContent() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [editingKey, setEditingKey] = useState<string | null>(null);
@@ -170,5 +171,13 @@ export default function DashboardsPage() {
         onSubmit={handleUpdate}
       />
     </div>
+  );
+}
+
+export default function DashboardsPage() {
+  return (
+    <ProtectedRoute>
+      <DashboardsContent />
+    </ProtectedRoute>
   );
 }

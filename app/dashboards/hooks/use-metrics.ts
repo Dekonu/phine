@@ -1,8 +1,10 @@
 import { useState, useEffect } from "react";
+import { useSession } from "next-auth/react";
 import type { ApiMetrics } from "../types";
 import { apiClient } from "@/lib/api-client";
 
 export function useMetrics() {
+  const { data: session } = useSession();
   const [metrics, setMetrics] = useState<ApiMetrics>({
     totalRequests: 0,
     requestsToday: 0,
@@ -11,6 +13,15 @@ export function useMetrics() {
     usageData: [],
   });
   const [loading, setLoading] = useState(true);
+
+  // Set user ID in API client when session is available
+  useEffect(() => {
+    if (session?.user?.dbId) {
+      apiClient.setUserId(session.user.dbId);
+    } else {
+      apiClient.setUserId(null);
+    }
+  }, [session]);
 
   const fetchMetrics = async () => {
     try {
@@ -33,11 +44,13 @@ export function useMetrics() {
   };
 
   useEffect(() => {
-    fetchMetrics();
-    // Refresh metrics every 30 seconds
-    const interval = setInterval(fetchMetrics, 30000);
-    return () => clearInterval(interval);
-  }, []);
+    if (session?.user?.dbId) {
+      fetchMetrics();
+      // Refresh metrics every 30 seconds
+      const interval = setInterval(fetchMetrics, 30000);
+      return () => clearInterval(interval);
+    }
+  }, [session?.user?.dbId]);
 
   return { metrics, loading, refetch: fetchMetrics };
 }

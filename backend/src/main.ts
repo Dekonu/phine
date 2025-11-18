@@ -35,12 +35,15 @@ async function bootstrap() {
     },
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'X-API-Key'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-API-Key', 'X-User-ID'],
   });
 
   const port = process.env.PORT || 3001;
   await app.listen(port);
-  console.log(`Backend server running on http://localhost:${port}`);
+  
+  // Bootstrap logging - using console for initial startup message
+  // Services use NestJS Logger for runtime logging
+  console.log(`🚀 Backend server running on http://localhost:${port}`);
 }
 
 bootstrap();

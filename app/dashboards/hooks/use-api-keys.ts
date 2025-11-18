@@ -1,13 +1,24 @@
 import { useState, useEffect } from "react";
+import { useSession } from "next-auth/react";
 import type { ApiKey } from "../types";
 import { apiClient } from "@/lib/api-client";
 
 export function useApiKeys() {
+  const { data: session } = useSession();
   const [apiKeys, setApiKeys] = useState<ApiKey[]>([]);
   const [loading, setLoading] = useState(true);
   const [visibleKeys, setVisibleKeys] = useState<Set<string>>(new Set());
   const [fullKeys, setFullKeys] = useState<Map<string, string>>(new Map());
   const [loadingKeys, setLoadingKeys] = useState<Set<string>>(new Set());
+
+  // Set user ID in API client when session is available
+  useEffect(() => {
+    if (session?.user?.dbId) {
+      apiClient.setUserId(session.user.dbId);
+    } else {
+      apiClient.setUserId(null);
+    }
+  }, [session]);
 
   const fetchApiKeys = async () => {
     try {
@@ -24,8 +35,10 @@ export function useApiKeys() {
   };
 
   useEffect(() => {
-    fetchApiKeys();
-  }, []);
+    if (session?.user?.dbId) {
+      fetchApiKeys();
+    }
+  }, [session?.user?.dbId]);
 
   const toggleKeyVisibility = async (keyId: string) => {
     const isCurrentlyVisible = visibleKeys.has(keyId);

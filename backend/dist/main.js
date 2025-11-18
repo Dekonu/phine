@@ -25,11 +25,11 @@ async function bootstrap() {
         },
         credentials: true,
         methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-        allowedHeaders: ['Content-Type', 'Authorization', 'X-API-Key'],
+        allowedHeaders: ['Content-Type', 'Authorization', 'X-API-Key', 'X-User-ID'],
     });
     const port = process.env.PORT || 3001;
     await app.listen(port);
-    console.log(`Backend server running on http://localhost:${port}`);
+    console.log(`🚀 Backend server running on http://localhost:${port}`);
 }
 bootstrap();
 //# sourceMappingURL=main.js.map

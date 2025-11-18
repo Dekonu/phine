@@ -9,23 +9,27 @@ import {
   HttpCode,
   HttpStatus,
   HttpException,
+  UseGuards,
 } from '@nestjs/common';
 import { ApiKeysService } from './api-keys.service';
 import { CreateApiKeyDto } from './dto/create-api-key.dto';
 import { UpdateApiKeyDto } from './dto/update-api-key.dto';
+import { UserAuthGuard } from '../common/guards/user-auth.guard';
+import { UserId } from '../common/decorators/user-id.decorator';
 
 @Controller('api-keys')
+@UseGuards(UserAuthGuard)
 export class ApiKeysController {
   constructor(private readonly apiKeysService: ApiKeysService) {}
 
   @Get()
-  async getAllApiKeys() {
-    return this.apiKeysService.getAllApiKeys();
+  async getAllApiKeys(@UserId() userId: string) {
+    return this.apiKeysService.getAllApiKeys(userId);
   }
 
   @Get(':id')
-  async getApiKeyById(@Param('id') id: string) {
-    const apiKey = await this.apiKeysService.getApiKeyById(id);
+  async getApiKeyById(@Param('id') id: string, @UserId() userId: string) {
+    const apiKey = await this.apiKeysService.getApiKeyById(id, userId);
 
     if (!apiKey) {
       throw new HttpException({ error: 'API key not found' }, HttpStatus.NOT_FOUND);
@@ -42,8 +46,8 @@ export class ApiKeysController {
   }
 
   @Get(':id/reveal')
-  async revealApiKey(@Param('id') id: string) {
-    const apiKey = await this.apiKeysService.getApiKeyById(id);
+  async revealApiKey(@Param('id') id: string, @UserId() userId: string) {
+    const apiKey = await this.apiKeysService.getApiKeyById(id, userId);
 
     if (!apiKey) {
       throw new HttpException({ error: 'API key not found' }, HttpStatus.NOT_FOUND);
@@ -58,7 +62,7 @@ export class ApiKeysController {
 
   @Post()
   @HttpCode(HttpStatus.CREATED)
-  async createApiKey(@Body() createApiKeyDto: CreateApiKeyDto) {
+  async createApiKey(@Body() createApiKeyDto: CreateApiKeyDto, @UserId() userId: string) {
     const { name } = createApiKeyDto;
 
     if (!name || typeof name !== 'string' || name.trim().length === 0) {
@@ -69,7 +73,7 @@ export class ApiKeysController {
     }
 
     try {
-      const newApiKey = await this.apiKeysService.createApiKey(name.trim());
+      const newApiKey = await this.apiKeysService.createApiKey(name.trim(), userId);
       return newApiKey;
     } catch (error) {
       console.error('Error creating API key:', error);
@@ -81,7 +85,11 @@ export class ApiKeysController {
   }
 
   @Put(':id')
-  async updateApiKey(@Param('id') id: string, @Body() updateApiKeyDto: UpdateApiKeyDto) {
+  async updateApiKey(
+    @Param('id') id: string,
+    @Body() updateApiKeyDto: UpdateApiKeyDto,
+    @UserId() userId: string,
+  ) {
     const { name } = updateApiKeyDto;
 
     if (!name || typeof name !== 'string' || name.trim().length === 0) {
@@ -92,7 +100,7 @@ export class ApiKeysController {
     }
 
     try {
-      const updatedKey = await this.apiKeysService.updateApiKey(id, name.trim());
+      const updatedKey = await this.apiKeysService.updateApiKey(id, name.trim(), userId);
 
       if (!updatedKey) {
         throw new HttpException({ error: 'API key not found' }, HttpStatus.NOT_FOUND);
@@ -118,9 +126,9 @@ export class ApiKeysController {
   }
 
   @Delete(':id')
-  async deleteApiKey(@Param('id') id: string) {
+  async deleteApiKey(@Param('id') id: string, @UserId() userId: string) {
     try {
-      const deleted = await this.apiKeysService.deleteApiKey(id);
+      const deleted = await this.apiKeysService.deleteApiKey(id, userId);
 
       if (!deleted) {
         throw new HttpException({ error: 'API key not found' }, HttpStatus.NOT_FOUND);

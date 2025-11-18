@@ -7,6 +7,7 @@ export interface ApiKey {
   usageCount: number;
   remainingUses: number;
   actualUsage?: number;
+  userId?: string; // Optional user ID for internal use
 }
 
 export interface ApiUsage {
