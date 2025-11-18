@@ -9,9 +9,23 @@ const envPath = (0, path_1.resolve)(__dirname, '../.env');
 async function bootstrap() {
     const app = await core_1.NestFactory.create(app_module_1.AppModule);
     app.setGlobalPrefix('api');
+    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
     app.enableCors({
-        origin: process.env.FRONTEND_URL || 'http://localhost:3000',
+        origin: (origin, callback) => {
+            if (!origin) {
+                return callback(null, true);
+            }
+            if (origin === frontendUrl) {
+                return callback(null, true);
+            }
+            if (process.env.NODE_ENV !== 'production' && origin.startsWith('http://localhost:')) {
+                return callback(null, true);
+            }
+            callback(new Error('Not allowed by CORS'));
+        },
         credentials: true,
+        methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+        allowedHeaders: ['Content-Type', 'Authorization', 'X-API-Key'],
     });
     const port = process.env.PORT || 3001;
     await app.listen(port);

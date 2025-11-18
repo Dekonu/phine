@@ -13,9 +13,13 @@ exports.GitHubSummarizerService = void 0;
 const common_1 = require("@nestjs/common");
 const api_keys_service_1 = require("../api-keys/api-keys.service");
 const github_summarizer_response_schema_1 = require("./schemas/github-summarizer-response.schema");
+const github_cache_service_1 = require("./github-cache.service");
 let GitHubSummarizerService = class GitHubSummarizerService {
-    constructor(apiKeysService) {
+    constructor(apiKeysService, cacheService) {
         this.apiKeysService = apiKeysService;
+        this.cacheService = cacheService;
+        this.githubToken = process.env.GITHUB_PAT || process.env.GITHUB_TOKEN;
+        this.openAIApiKey = process.env.OPENAI_API_KEY;
     }
     async processRequest(apiKey, gitHubUrl) {
         const originalApiKey = apiKey.trim();
@@ -45,11 +49,22 @@ let GitHubSummarizerService = class GitHubSummarizerService {
         if (!githubUrlPattern.test(gitHubUrl.trim())) {
             throw new common_1.HttpException({ error: 'Invalid GitHub URL format. Expected format: https://github.com/owner/repo' }, common_1.HttpStatus.BAD_REQUEST);
         }
+        let normalizedUrl = gitHubUrl.trim();
+        if (normalizedUrl.endsWith('/')) {
+            normalizedUrl = normalizedUrl.slice(0, -1);
+        }
+        if (normalizedUrl.endsWith('.git')) {
+            normalizedUrl = normalizedUrl.slice(0, -4);
+        }
+        const cachedResult = this.cacheService.get(normalizedUrl);
+        if (cachedResult) {
+            console.log(`[GitHub Summarizer] Returning cached result for ${normalizedUrl}`);
+            return cachedResult;
+        }
         let usageConsumed = false;
         const keyIdForUsage = freshKey.id;
         let owner = null;
         let repo = null;
-        let normalizedUrl = '';
         try {
             const hasRemainingUses = await this.apiKeysService.checkAndConsumeUsage(keyIdForUsage);
             if (!hasRemainingUses) {
@@ -61,56 +76,96 @@ let GitHubSummarizerService = class GitHubSummarizerService {
             }
             usageConsumed = true;
             const { GithubRepoLoader } = require('@langchain/community/document_loaders/web/github');
-            normalizedUrl = gitHubUrl.trim();
-            if (normalizedUrl.endsWith('/')) {
-                normalizedUrl = normalizedUrl.slice(0, -1);
-            }
-            if (normalizedUrl.endsWith('.git')) {
-                normalizedUrl = normalizedUrl.slice(0, -4);
-            }
             const urlMatch = normalizedUrl.match(/github\.com\/([^\/]+)\/([^\/]+)/i);
             if (!urlMatch) {
                 throw new common_1.HttpException({ error: 'Invalid GitHub URL format' }, common_1.HttpStatus.BAD_REQUEST);
             }
             [, owner, repo] = urlMatch;
-            const commonBranches = ['main', 'master', 'develop', 'dev', 'trunk'];
-            let docs;
+            let readmeContent = null;
             let lastError = null;
+            let rateLimitReset;
+            let rateLimitRemaining;
+            const commonBranches = ['main', 'master', 'develop', 'dev', 'trunk'];
             for (const branch of commonBranches) {
                 try {
-                    const loader = new GithubRepoLoader(normalizedUrl, {
-                        branch: branch,
-                        recursive: true,
-                        unknown: "ignore",
-                        fileGlob: ["README.md", "readme.md", "README.MD", "readme.MD"],
-                        ignoreFiles: [
-                            "**/node_modules/**",
-                            "**/.git/**",
-                            "**/dist/**",
-                            "**/build/**",
-                            "**/.next/**",
-                            "**/coverage/**",
-                            "**/.github/**",
-                        ],
-                    });
-                    docs = await loader.load();
-                    lastError = null;
-                    break;
+                    const headers = {
+                        Accept: 'application/vnd.github.v3.raw',
+                        'User-Agent': 'GitHub-Summarizer',
+                    };
+                    if (this.githubToken) {
+                        headers.Authorization = `Bearer ${this.githubToken}`;
+                    }
+                    const response = await fetch(`https://api.github.com/repos/${owner}/${repo}/contents/README.md?ref=${branch}`, { headers });
+                    const resetHeader = response.headers.get('x-ratelimit-reset');
+                    const remainingHeader = response.headers.get('x-ratelimit-remaining');
+                    if (resetHeader)
+                        rateLimitReset = parseInt(resetHeader, 10);
+                    if (remainingHeader)
+                        rateLimitRemaining = parseInt(remainingHeader, 10);
+                    if (response.ok) {
+                        readmeContent = await response.text();
+                        break;
+                    }
+                    else if (response.status === 404) {
+                        continue;
+                    }
+                    else if (response.status === 429) {
+                        throw new Error('GitHub API rate limit exceeded');
+                    }
+                    else {
+                        throw new Error(`GitHub API error: ${response.status}`);
+                    }
                 }
                 catch (error) {
                     lastError = error instanceof Error ? error : new Error(String(error));
-                    if (lastError.message.includes('No commit found for the ref') ||
-                        lastError.message.includes('404') ||
-                        lastError.message.includes('not found')) {
-                        continue;
+                    if (lastError.message.includes('rate limit') || lastError.message.includes('429')) {
+                        break;
                     }
-                    break;
+                    if (!lastError.message.includes('404')) {
+                        break;
+                    }
                 }
             }
-            if (!docs) {
+            let docs = [];
+            if (!readmeContent) {
+                try {
+                    const loaderOptions = {
+                        branch: 'main',
+                        recursive: false,
+                        unknown: "ignore",
+                        fileGlob: ["README.md"],
+                    };
+                    if (this.githubToken) {
+                        loaderOptions.accessToken = this.githubToken;
+                    }
+                    const loader = new GithubRepoLoader(normalizedUrl, loaderOptions);
+                    docs = await loader.load();
+                }
+                catch (error) {
+                    if (!lastError) {
+                        lastError = error instanceof Error ? error : new Error(String(error));
+                    }
+                }
+            }
+            let readmeDocs = [];
+            if (readmeContent) {
+                readmeDocs = [{
+                        pageContent: readmeContent,
+                        metadata: { source: 'README.md' },
+                    }];
+            }
+            else if (docs && docs.length > 0) {
+                readmeDocs = docs.filter((doc) => {
+                    const source = doc.metadata?.source || '';
+                    const fileName = source.split('/').pop() || '';
+                    return /^README\.md$/i.test(fileName);
+                });
+            }
+            if (readmeDocs.length === 0) {
                 if (lastError) {
                     let errorMessage = 'Failed to load repository from GitHub';
                     let statusCode = common_1.HttpStatus.INTERNAL_SERVER_ERROR;
+                    const errorResponse = { error: errorMessage };
                     if (lastError instanceof Error) {
                         const errorMsg = lastError.message.toLowerCase();
                         if (errorMsg.includes('rate limit') ||
@@ -119,6 +174,14 @@ let GitHubSummarizerService = class GitHubSummarizerService {
                             errorMsg.includes('api rate limit')) {
                             statusCode = common_1.HttpStatus.TOO_MANY_REQUESTS;
                             errorMessage = 'GitHub API rate limit exceeded';
+                            if (rateLimitReset) {
+                                errorResponse.rateLimitReset = new Date(rateLimitReset * 1000).toISOString();
+                                const waitTime = Math.max(0, rateLimitReset - Math.floor(Date.now() / 1000));
+                                errorResponse.waitTimeSeconds = waitTime;
+                            }
+                            if (rateLimitRemaining !== undefined) {
+                                errorResponse.rateLimitRemaining = rateLimitRemaining;
+                            }
                         }
                         else if (errorMsg.includes('404') ||
                             errorMsg.includes('not found') ||
@@ -131,6 +194,14 @@ let GitHubSummarizerService = class GitHubSummarizerService {
                             if (errorMsg.includes('rate limit') || errorMsg.includes('api rate limit')) {
                                 statusCode = common_1.HttpStatus.TOO_MANY_REQUESTS;
                                 errorMessage = 'GitHub API rate limit exceeded';
+                                if (rateLimitReset) {
+                                    errorResponse.rateLimitReset = new Date(rateLimitReset * 1000).toISOString();
+                                    const waitTime = Math.max(0, rateLimitReset - Math.floor(Date.now() / 1000));
+                                    errorResponse.waitTimeSeconds = waitTime;
+                                }
+                                if (rateLimitRemaining !== undefined) {
+                                    errorResponse.rateLimitRemaining = rateLimitRemaining;
+                                }
                             }
                             else {
                                 statusCode = common_1.HttpStatus.FORBIDDEN;
@@ -152,16 +223,9 @@ let GitHubSummarizerService = class GitHubSummarizerService {
                             errorMessage = `Failed to load repository: ${lastError.message}`;
                         }
                     }
-                    throw new common_1.HttpException({ error: errorMessage }, statusCode);
+                    errorResponse.error = errorMessage;
+                    throw new common_1.HttpException(errorResponse, statusCode);
                 }
-                throw new common_1.HttpException({ error: 'Unable to determine the default branch for this repository. The repository may be empty or inaccessible.' }, common_1.HttpStatus.NOT_FOUND);
-            }
-            const readmeDocs = docs.filter((doc) => {
-                const source = doc.metadata?.source || '';
-                const fileName = source.split('/').pop() || '';
-                return /^README\.md$/i.test(fileName);
-            });
-            if (readmeDocs.length === 0) {
                 const noReadmeResponse = {
                     summary: "No README.md file found in this repository.",
                     coolFacts: ["This repository does not contain a README file."],
@@ -169,138 +233,81 @@ let GitHubSummarizerService = class GitHubSummarizerService {
                     repo: gitHubUrl,
                 };
                 const validated = github_summarizer_response_schema_1.GitHubSummarizerResponseSchema.parse(noReadmeResponse);
+                this.cacheService.set(normalizedUrl, validated);
                 await this.apiKeysService.recordApiUsage(keyIdForUsage, undefined, true);
                 return validated;
             }
-            const readmeContent = readmeDocs
+            const finalReadmeContent = readmeContent || readmeDocs
                 .map((doc) => doc.pageContent)
                 .filter((content) => content && content.trim().length > 0)
                 .join("\n\n---\n\n");
-            const extractInfo = (text) => {
-                if (text.includes('See https://help.github.com/articles/ignoring-files/')) {
-                    return null;
-                }
-                const lines = text.split('\n');
-                const sections = {
-                    title: [],
-                    description: [],
-                    features: [],
-                    installation: [],
-                    usage: [],
-                    technologies: [],
-                    facts: [],
+            if (finalReadmeContent.includes('See https://help.github.com/articles/ignoring-files/')) {
+                const errorResponse = {
+                    summary: "Unable to extract summary from README. The file may be empty or in an unexpected format.",
+                    coolFacts: ["The repository may not contain a valid README file."],
+                    filesAnalyzed: readmeDocs.length,
+                    repo: gitHubUrl,
+                    readmeLength: finalReadmeContent.length,
                 };
-                let currentSection = 'description';
-                let foundFirstHeader = false;
-                for (let i = 0; i < lines.length; i++) {
-                    const line = lines[i].trim();
-                    if (!foundFirstHeader && line.length === 0) {
-                        continue;
-                    }
-                    if (line.startsWith('# ') && !foundFirstHeader) {
-                        const title = line.replace(/^#+\s*/, '').trim();
-                        if (title.length > 0) {
-                            sections.title.push(title);
-                            foundFirstHeader = true;
-                            currentSection = 'description';
-                        }
-                        continue;
-                    }
-                    if (line.match(/^##+\s+/)) {
-                        const headerText = line.replace(/^#+\s*/, '').trim().toLowerCase();
-                        if (headerText.match(/(features?|what|about|overview)/)) {
-                            currentSection = 'features';
-                        }
-                        else if (headerText.match(/(install|setup|getting started|quick start)/)) {
-                            currentSection = 'installation';
-                        }
-                        else if (headerText.match(/(usage|how to use|example|examples|demo)/)) {
-                            currentSection = 'usage';
-                        }
-                        else if (headerText.match(/(tech|stack|built with|technologies?|tools|dependencies)/)) {
-                            currentSection = 'technologies';
-                        }
-                        else if (headerText.match(/(description|about|overview|introduction)/)) {
-                            currentSection = 'description';
-                        }
-                        else if (headerText.match(/(facts?|interesting|highlights?|notable|fun facts?)/)) {
-                            currentSection = 'facts';
-                        }
-                        continue;
-                    }
-                    if (line.length > 0 &&
-                        !line.startsWith('#') &&
-                        !line.startsWith('```') &&
-                        !line.startsWith('|') &&
-                        !line.match(/^\[.*\]\(.*\)$/) &&
-                        line.length < 200) {
-                        if (sections[currentSection].length < 20) {
-                            sections[currentSection].push(line);
-                        }
-                    }
-                }
-                const summaryParts = [];
-                if (sections.title.length > 0) {
-                    summaryParts.push(sections.title[0]);
-                }
-                if (sections.description.length > 0) {
-                    const desc = sections.description.slice(0, 10).join(' ').trim();
-                    if (desc.length > 0) {
-                        summaryParts.push(desc);
-                    }
-                }
-                if (summaryParts.length === 0) {
-                    const cleanText = text.replace(/```[\s\S]*?```/g, '').replace(/\[.*?\]\(.*?\)/g, '').trim();
-                    const firstParagraph = cleanText.split('\n\n')[0] || cleanText.substring(0, 500);
-                    summaryParts.push(firstParagraph);
-                }
-                const summary = summaryParts.join('. ').substring(0, 500).trim();
-                const coolFacts = [];
-                if (sections.features.length > 0) {
-                    sections.features.slice(0, 3).forEach((feature) => {
-                        if (feature.length > 20 && feature.length < 150) {
-                            coolFacts.push(feature);
-                        }
+                const validated = github_summarizer_response_schema_1.GitHubSummarizerResponseSchema.parse(errorResponse);
+                this.cacheService.set(normalizedUrl, validated);
+                await this.apiKeysService.recordApiUsage(keyIdForUsage, undefined, true);
+                return validated;
+            }
+            let extractedInfo = null;
+            if (this.openAIApiKey) {
+                try {
+                    const { ChatOpenAI } = require('@langchain/openai');
+                    const model = new ChatOpenAI({
+                        model: 'gpt-4o-mini',
+                        temperature: 0.3,
+                        apiKey: this.openAIApiKey,
                     });
-                }
-                if (sections.technologies.length > 0) {
-                    const techList = sections.technologies.slice(0, 5).join(', ');
-                    if (techList.length > 0) {
-                        coolFacts.push(`Built with: ${techList}`);
-                    }
-                }
-                if (sections.facts.length > 0) {
-                    sections.facts.slice(0, 5).forEach((fact) => {
-                        if (fact.length > 20 && fact.length < 200) {
-                            coolFacts.push(fact);
-                        }
+                    const outputSchema = github_summarizer_response_schema_1.GitHubSummarizerResponseSchema.pick({
+                        summary: true,
+                        coolFacts: true,
                     });
-                }
-                if (coolFacts.length < 3 && sections.description.length > 0) {
-                    sections.description.slice(5, 10).forEach((line) => {
-                        if (line.length > 30 && line.length < 150 && !coolFacts.includes(line)) {
-                            coolFacts.push(line);
-                        }
+                    const structuredModel = model.withStructuredOutput(outputSchema, {
+                        name: 'GitHubSummarizerResponse',
                     });
+                    const limitedContent = finalReadmeContent.substring(0, 4000);
+                    const prompt = `Extract from this README:
+1. Summary (max 300 chars): What is this project?
+2. 3-5 cool facts: Key features, tech stack, notable aspects
+
+Rules: Plain text only, no HTML/Markdown/badges/images/links.
+
+README:
+${limitedContent}${finalReadmeContent.length > 4000 ? '...' : ''}`;
+                    const result = await structuredModel.invoke(prompt);
+                    const cleanSummary = this.cleanText(result.summary || 'A well-documented project with comprehensive information.');
+                    const cleanFacts = (result.coolFacts && result.coolFacts.length > 0
+                        ? result.coolFacts.slice(0, 5).map(fact => this.cleanText(fact))
+                        : ['This project has a comprehensive README with detailed documentation.']);
+                    extractedInfo = {
+                        summary: cleanSummary,
+                        coolFacts: cleanFacts,
+                    };
                 }
-                if (coolFacts.length === 0) {
-                    coolFacts.push('This project has a comprehensive README with detailed documentation.');
+                catch (error) {
+                    console.error('[GitHub Summarizer] Error using LLM for extraction:', error);
+                    extractedInfo = this.extractInfoManually(finalReadmeContent);
                 }
-                return {
-                    summary: summary || 'A well-documented project with comprehensive information.',
-                    coolFacts: coolFacts.slice(0, 5),
-                };
-            };
-            const extractedInfo = extractInfo(readmeContent);
+            }
+            else {
+                console.warn('[GitHub Summarizer] OPENAI_API_KEY not set, using manual extraction');
+                extractedInfo = this.extractInfoManually(finalReadmeContent);
+            }
             if (!extractedInfo) {
                 const errorResponse = {
                     summary: "Unable to extract summary from README. The file may be empty or in an unexpected format.",
                     coolFacts: ["The repository may not contain a valid README file."],
                     filesAnalyzed: readmeDocs.length,
                     repo: gitHubUrl,
-                    readmeLength: readmeContent.length,
+                    readmeLength: finalReadmeContent.length,
                 };
                 const validated = github_summarizer_response_schema_1.GitHubSummarizerResponseSchema.parse(errorResponse);
+                this.cacheService.set(normalizedUrl, validated);
                 await this.apiKeysService.recordApiUsage(keyIdForUsage, undefined, true);
                 return validated;
             }
@@ -312,6 +319,7 @@ let GitHubSummarizerService = class GitHubSummarizerService {
                 readmeLength: readmeContent.length,
             };
             const validatedResponse = github_summarizer_response_schema_1.GitHubSummarizerResponseSchema.parse(response);
+            this.cacheService.set(normalizedUrl, validatedResponse);
             await this.apiKeysService.recordApiUsage(keyIdForUsage, undefined, true);
             return validatedResponse;
         }
@@ -374,10 +382,148 @@ let GitHubSummarizerService = class GitHubSummarizerService {
             throw new common_1.HttpException({ error: errorMessage }, statusCode);
         }
     }
+    cleanText(text) {
+        if (!text)
+            return text;
+        let cleaned = text.replace(/<[^>]*>/g, '');
+        cleaned = cleaned.replace(/!\[([^\]]*)\]\([^\)]*\)/g, '$1');
+        cleaned = cleaned.replace(/\[([^\]]+)\]\([^\)]+\)/g, '$1');
+        cleaned = cleaned.replace(/!\[.*?\]\(https?:\/\/[^\)]+\)/g, '');
+        cleaned = cleaned.replace(/^#+\s+/gm, '');
+        cleaned = cleaned.replace(/```[\s\S]*?```/g, '');
+        cleaned = cleaned.replace(/`[^`]+`/g, '');
+        cleaned = cleaned.replace(/\*\*([^\*]+)\*\*/g, '$1');
+        cleaned = cleaned.replace(/\*([^\*]+)\*/g, '$1');
+        cleaned = cleaned.replace(/__([^_]+)__/g, '$1');
+        cleaned = cleaned.replace(/_([^_]+)_/g, '$1');
+        cleaned = cleaned.replace(/^[\*\-\+]\s+/gm, '');
+        cleaned = cleaned.replace(/^\d+\.\s+/gm, '');
+        cleaned = cleaned.replace(/\|.*?\|/g, '');
+        cleaned = cleaned.replace(/\s+/g, ' ').trim();
+        cleaned = cleaned.replace(/[^\w\s\.\,\!\?\:\;\-\(\)]/g, ' ');
+        cleaned = cleaned.replace(/\s+/g, ' ').trim();
+        return cleaned;
+    }
+    extractInfoManually(text) {
+        if (text.includes('See https://help.github.com/articles/ignoring-files/')) {
+            return null;
+        }
+        const lines = text.split('\n');
+        const sections = {
+            title: [],
+            description: [],
+            features: [],
+            installation: [],
+            usage: [],
+            technologies: [],
+            facts: [],
+        };
+        let currentSection = 'description';
+        let foundFirstHeader = false;
+        for (let i = 0; i < lines.length; i++) {
+            const line = lines[i].trim();
+            if (!foundFirstHeader && line.length === 0) {
+                continue;
+            }
+            if (line.startsWith('# ') && !foundFirstHeader) {
+                const title = line.replace(/^#+\s*/, '').trim();
+                if (title.length > 0) {
+                    sections.title.push(title);
+                    foundFirstHeader = true;
+                    currentSection = 'description';
+                }
+                continue;
+            }
+            if (line.match(/^##+\s+/)) {
+                const headerText = line.replace(/^#+\s*/, '').trim().toLowerCase();
+                if (headerText.match(/(features?|what|about|overview)/)) {
+                    currentSection = 'features';
+                }
+                else if (headerText.match(/(install|setup|getting started|quick start)/)) {
+                    currentSection = 'installation';
+                }
+                else if (headerText.match(/(usage|how to use|example|examples|demo)/)) {
+                    currentSection = 'usage';
+                }
+                else if (headerText.match(/(tech|stack|built with|technologies?|tools|dependencies)/)) {
+                    currentSection = 'technologies';
+                }
+                else if (headerText.match(/(description|about|overview|introduction)/)) {
+                    currentSection = 'description';
+                }
+                else if (headerText.match(/(facts?|interesting|highlights?|notable|fun facts?)/)) {
+                    currentSection = 'facts';
+                }
+                continue;
+            }
+            if (line.length > 0 &&
+                !line.startsWith('#') &&
+                !line.startsWith('```') &&
+                !line.startsWith('|') &&
+                !line.match(/^\[.*\]\(.*\)$/) &&
+                line.length < 200) {
+                if (sections[currentSection].length < 20) {
+                    sections[currentSection].push(line);
+                }
+            }
+        }
+        const summaryParts = [];
+        if (sections.title.length > 0) {
+            summaryParts.push(sections.title[0]);
+        }
+        if (sections.description.length > 0) {
+            const desc = sections.description.slice(0, 10).join(' ').trim();
+            if (desc.length > 0) {
+                summaryParts.push(desc);
+            }
+        }
+        if (summaryParts.length === 0) {
+            const cleanText = text.replace(/```[\s\S]*?```/g, '').replace(/\[.*?\]\(.*?\)/g, '').trim();
+            const firstParagraph = cleanText.split('\n\n')[0] || cleanText.substring(0, 500);
+            summaryParts.push(firstParagraph);
+        }
+        const summary = summaryParts.join('. ').substring(0, 500).trim();
+        const coolFacts = [];
+        if (sections.features.length > 0) {
+            sections.features.slice(0, 3).forEach((feature) => {
+                if (feature.length > 20 && feature.length < 150) {
+                    coolFacts.push(feature);
+                }
+            });
+        }
+        if (sections.technologies.length > 0) {
+            const techList = sections.technologies.slice(0, 5).join(', ');
+            if (techList.length > 0) {
+                coolFacts.push(`Built with: ${techList}`);
+            }
+        }
+        if (sections.facts.length > 0) {
+            sections.facts.slice(0, 5).forEach((fact) => {
+                if (fact.length > 20 && fact.length < 200) {
+                    coolFacts.push(fact);
+                }
+            });
+        }
+        if (coolFacts.length < 3 && sections.description.length > 0) {
+            sections.description.slice(5, 10).forEach((line) => {
+                if (line.length > 30 && line.length < 150 && !coolFacts.includes(line)) {
+                    coolFacts.push(line);
+                }
+            });
+        }
+        if (coolFacts.length === 0) {
+            coolFacts.push('This project has a comprehensive README with detailed documentation.');
+        }
+        return {
+            summary: summary || 'A well-documented project with comprehensive information.',
+            coolFacts: coolFacts.slice(0, 5),
+        };
+    }
 };
 exports.GitHubSummarizerService = GitHubSummarizerService;
 exports.GitHubSummarizerService = GitHubSummarizerService = __decorate([
     (0, common_1.Injectable)(),
-    __metadata("design:paramtypes", [api_keys_service_1.ApiKeysService])
+    __metadata("design:paramtypes", [api_keys_service_1.ApiKeysService,
+        github_cache_service_1.GitHubCacheService])
 ], GitHubSummarizerService);
 //# sourceMappingURL=github-summarizer.service.js.map

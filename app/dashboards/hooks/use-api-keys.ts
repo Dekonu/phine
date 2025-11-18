@@ -11,10 +11,13 @@ export function useApiKeys() {
 
   const fetchApiKeys = async () => {
     try {
+      setLoading(true);
       const data = await apiClient.getAllApiKeys();
       setApiKeys(data);
     } catch (error) {
       console.error("Failed to fetch API keys:", error);
+      // Set empty array on error to prevent UI issues
+      setApiKeys([]);
     } finally {
       setLoading(false);
     }

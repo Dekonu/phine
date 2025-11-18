@@ -31,20 +31,34 @@ class ApiClient {
     options: RequestInit = {},
   ): Promise<T> {
     const url = `${this.baseUrl}${endpoint}`;
-    const response = await fetch(url, {
-      ...options,
-      headers: {
-        'Content-Type': 'application/json',
-        ...options.headers,
-      },
-    });
+    
+    try {
+      const response = await fetch(url, {
+        ...options,
+        headers: {
+          'Content-Type': 'application/json',
+          ...options.headers,
+        },
+      });
 
-    if (!response.ok) {
-      const error = await response.json().catch(() => ({ error: 'Request failed' }));
-      throw new Error(error.error || `HTTP error! status: ${response.status}`);
+      if (!response.ok) {
+        const error = await response.json().catch(() => ({ error: 'Request failed' }));
+        throw new Error(error.error || `HTTP error! status: ${response.status}`);
+      }
+
+      return response.json();
+    } catch (error) {
+      // Handle network errors (backend not running, CORS, etc.)
+      if (error instanceof TypeError && error.message.includes('fetch')) {
+        throw new Error(
+          `Failed to connect to backend server at ${this.baseUrl}. ` +
+          `Please ensure the backend is running and accessible. ` +
+          `Check that NEXT_PUBLIC_API_URL is set correctly in your environment variables.`
+        );
+      }
+      // Re-throw other errors
+      throw error;
     }
-
-    return response.json();
   }
 
   // API Keys endpoints
@@ -97,17 +111,26 @@ class ApiClient {
   async summarizeGitHub(
     apiKey: string,
     gitHubUrl: string,
-  ): Promise<{ message: string; gitHubUrl: string; status: string }> {
-    return this.request<{ message: string; gitHubUrl: string; status: string }>(
-      '/api/github-summarizer',
-      {
-        method: 'POST',
-        headers: {
-          'X-API-Key': apiKey,
-        },
-        body: JSON.stringify({ gitHubUrl }),
+  ): Promise<{
+    summary: string;
+    coolFacts: string[];
+    filesAnalyzed: number;
+    repo: string;
+    readmeLength?: number;
+  }> {
+    return this.request<{
+      summary: string;
+      coolFacts: string[];
+      filesAnalyzed: number;
+      repo: string;
+      readmeLength?: number;
+    }>('/api/github-summarizer', {
+      method: 'POST',
+      headers: {
+        'X-API-Key': apiKey,
       },
-    );
+      body: JSON.stringify({ gitHubUrl }),
+    });
   }
 }
 

@@ -10,6 +10,7 @@ exports.GitHubSummarizerModule = void 0;
 const common_1 = require("@nestjs/common");
 const github_summarizer_controller_1 = require("./github-summarizer.controller");
 const github_summarizer_service_1 = require("./github-summarizer.service");
+const github_cache_service_1 = require("./github-cache.service");
 const api_keys_module_1 = require("../api-keys/api-keys.module");
 let GitHubSummarizerModule = class GitHubSummarizerModule {
 };
@@ -18,7 +19,7 @@ exports.GitHubSummarizerModule = GitHubSummarizerModule = __decorate([
     (0, common_1.Module)({
         imports: [api_keys_module_1.ApiKeysModule],
         controllers: [github_summarizer_controller_1.GitHubSummarizerController],
-        providers: [github_summarizer_service_1.GitHubSummarizerService],
+        providers: [github_summarizer_service_1.GitHubSummarizerService, github_cache_service_1.GitHubCacheService],
     })
 ], GitHubSummarizerModule);
 //# sourceMappingURL=github-summarizer.module.js.map
