@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { LoginButton } from "./components/login-button";
 
 export default function Home() {
   return (
@@ -10,6 +11,11 @@ export default function Home() {
             <span className="text-lg font-bold text-white">P</span>
           </div>
           <span className="text-sm font-semibold tracking-tight text-zinc-700 dark:text-zinc-300">Phine</span>
+        </div>
+
+        {/* Login Button - Top Right */}
+        <div className="absolute top-8 right-8">
+          <LoginButton />
         </div>
 
         {/* Main Content - Centered */}
