@@ -1,6 +1,7 @@
 import { config } from 'dotenv';
 import { resolve } from 'path';
 import { NestFactory } from '@nestjs/core';
+import { Logger } from '@nestjs/common';
 import { AppModule } from './app.module';
 
 // Load environment variables from .env file
@@ -41,9 +42,10 @@ async function bootstrap() {
   const port = process.env.PORT || 3001;
   await app.listen(port);
   
-  // Bootstrap logging - using console for initial startup message
+  // Bootstrap logging - Logger for initial startup message
   // Services use NestJS Logger for runtime logging
-  console.log(`🚀 Backend server running on http://localhost:${port}`);
+  const logger = new Logger('Bootstrap');
+  logger.log(`🚀 Backend server running on http://localhost:${port}`);
 }
 
 bootstrap();

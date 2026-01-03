@@ -25,7 +25,7 @@ export default function PlaygroundPage() {
       // Navigate to protected page with API key as query parameter
       router.push(`/protected?key=${encodeURIComponent(apiKey)}`);
     } catch (error) {
-      console.error("Error submitting form:", error);
+      // Error handling for navigation - non-critical, just reset loading state
       setLoading(false);
     }
   };
@@ -53,9 +53,12 @@ export default function PlaygroundPage() {
       
       // Redirect to summary page
       router.push('/summary');
-    } catch (error: any) {
-      console.error("Error summarizing GitHub repository:", error);
-      setGithubError(error.message || "Failed to summarize repository. Please check your API key and GitHub URL.");
+    } catch (error) {
+      const errorMessage =
+        error instanceof Error
+          ? error.message
+          : "Failed to summarize repository. Please check your API key and GitHub URL.";
+      setGithubError(errorMessage);
       setGithubLoading(false);
     }
   };

@@ -1,6 +1,9 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { SupabaseService } from '../supabase/supabase.service';
 
+/**
+ * Interface representing API usage metrics.
+ */
 export interface ApiMetrics {
   totalRequests: number;
   requestsToday: number;
@@ -9,10 +12,22 @@ export interface ApiMetrics {
   usageData: Array<{ date: string; count: number }>;
 }
 
+/**
+ * Service for retrieving and calculating API usage metrics.
+ * Aggregates data from the api_usage table to provide insights into API performance.
+ */
 @Injectable()
 export class MetricsService {
+  private readonly logger = new Logger(MetricsService.name);
+
   constructor(private supabaseService: SupabaseService) {}
 
+  /**
+   * Retrieves comprehensive API metrics including total requests, daily requests,
+   * average response time, success rate, and usage data for the last 7 days.
+   *
+   * @returns Promise resolving to ApiMetrics object with aggregated statistics
+   */
   async getApiMetrics(): Promise<ApiMetrics> {
     try {
       const now = new Date();
@@ -26,7 +41,7 @@ export class MetricsService {
         .select('*');
 
       if (allUsageError) {
-        console.error('Error fetching usage data:', allUsageError);
+        this.logger.error('Error fetching usage data from database', allUsageError);
         throw allUsageError;
       }
 
@@ -83,7 +98,10 @@ export class MetricsService {
         usageData,
       };
     } catch (error) {
-      console.error('Failed to get API metrics:', error);
+      this.logger.error(
+        'Failed to get API metrics',
+        error instanceof Error ? error.stack : error,
+      );
       return {
         totalRequests: 0,
         requestsToday: 0,

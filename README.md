@@ -1,6 +1,8 @@
 # Phine - API Key Management & GitHub Summarizer
 
-A personal project built to explore and experiment with modern web development technologies including **Cursor**, **TypeScript**, **Next.js**, and **Nest.js**. This application provides a platform for managing API keys and generating AI-powered summaries of GitHub repositories.
+> **A full-stack application built with Cursor AI** - This project demonstrates modern web development practices and explores AI-assisted pair programming using Cursor. Built following Eden Marco's course on leveraging Cursor for efficient development workflows.
+
+A production-ready full-stack application showcasing API key management, authentication, and AI-powered GitHub repository analysis. This project serves as a comprehensive example of building scalable applications with TypeScript, Next.js, Nest.js, and modern development tools.
 
 ## 🎯 Project Overview
 
@@ -10,6 +12,8 @@ This is a full-stack application that demonstrates:
 - **Database**: Supabase (PostgreSQL)
 - **Authentication**: Google SSO via NextAuth.js
 - **AI Integration**: OpenAI API for GitHub repository summarization
+
+> 📖 **For detailed information about the Cursor AI development process, see [CURSOR_DEVELOPMENT.md](./CURSOR_DEVELOPMENT.md)**
 
 ## ✨ Features
 
@@ -141,22 +145,34 @@ This is a full-stack application that demonstrates:
 ```
 phine/
 ├── app/                    # Next.js frontend (App Router)
-│   ├── dashboards/        # Dashboard pages
-│   ├── playground/         # API testing playground
-│   ├── summary/            # GitHub summary display
-│   └── components/         # React components
+│   ├── api/               # NextAuth API routes
+│   ├── components/        # Reusable React components
+│   ├── dashboards/        # Dashboard pages and components
+│   ├── playground/        # API testing playground
+│   ├── protected/         # Protected route example
+│   └── summary/           # GitHub summary display
 ├── backend/                # Nest.js backend
 │   └── src/
-│       ├── api-keys/       # API key management module
+│       ├── api-keys/      # API key management module
 │       ├── github-summarizer/  # GitHub summarization module
 │       ├── metrics/        # Analytics module
-│       └── supabase/       # Supabase service
+│       ├── validate/       # API key validation module
+│       ├── supabase/      # Supabase service
+│       └── common/        # Shared decorators and guards
 ├── lib/                    # Frontend utilities
 │   ├── api-client.ts      # API client for backend communication
+│   ├── auth.ts            # NextAuth configuration
 │   └── supabase-server.ts # Supabase server-side client
-└── supabase/
-    └── migrations/        # Database migrations
+├── supabase/
+│   └── migrations/        # Database migrations
+└── docs/                   # Documentation files
+    ├── README.md           # This file
+    ├── ARCHITECTURE.md     # Architecture documentation
+    ├── CURSOR_DEVELOPMENT.md  # Cursor AI development process
+    └── ...                 # Other setup guides
 ```
+
+> 📖 **For detailed architecture information, see [ARCHITECTURE.md](./ARCHITECTURE.md)**
 
 ## 🔒 Security Features
 
@@ -181,28 +197,97 @@ phine/
 ### Metrics
 - `GET /api/metrics` - Get API usage metrics
 
+## 🤖 Cursor AI Development Process
+
+This project was built as an exploration of **AI-assisted development** using Cursor. The development process involved:
+
+### Key Cursor Workflows Explored
+- **AI Pair Programming**: Leveraging Cursor's chat and autocomplete for rapid feature development
+- **Code Generation**: Using Cursor to generate boilerplate, components, and API endpoints
+- **Refactoring Assistance**: Utilizing AI suggestions for architecture improvements and code cleanup
+- **Type Safety**: Leveraging Cursor's understanding of TypeScript to maintain type safety across the codebase
+- **Documentation**: Using AI to generate comprehensive documentation and comments
+
+### Development Highlights
+- **Architecture Evolution**: Refactored from Next.js full-stack to separated frontend/backend architecture with Cursor's assistance
+- **Code Quality**: Implemented consistent patterns, error handling, and logging with AI-guided best practices
+- **Rapid Prototyping**: Quickly built complex features like GitHub summarization and API key management
+- **Learning Acceleration**: Used Cursor to understand and implement unfamiliar technologies (Nest.js, LangChain)
+
+### Technical Skills Demonstrated
+- **Full-Stack Development**: TypeScript, Next.js 14 (App Router), Nest.js
+- **Database Design**: PostgreSQL with Supabase, Row Level Security (RLS)
+- **Authentication**: OAuth 2.0 with NextAuth.js, Google SSO
+- **AI Integration**: OpenAI API, LangChain.js for document processing
+- **API Design**: RESTful APIs with proper error handling and validation
+- **Security**: API key management, user-scoped data access, secure key generation
+- **Modern Tooling**: Tailwind CSS, TypeScript, ESLint, Prettier
+
 ## 🎓 Learning Objectives
 
 This project was created to:
-- Explore **Cursor AI** for pair programming and code generation
-- Practice **TypeScript** for type-safe development
-- Learn **Next.js 14** App Router and server components
-- Understand **Nest.js** architecture and dependency injection
-- Implement **OAuth authentication** with NextAuth.js
-- Work with **Supabase** for database and authentication
-- Integrate **AI/LLM** services for intelligent features
+- **Explore Cursor AI** for pair programming and code generation (following Eden Marco's course)
+- **Practice TypeScript** for type-safe, maintainable development
+- **Master Next.js 14** App Router, Server Components, and modern React patterns
+- **Understand Nest.js** architecture, dependency injection, and modular design
+- **Implement OAuth authentication** with NextAuth.js and Google SSO
+- **Work with Supabase** for database operations and Row Level Security
+- **Integrate AI/LLM services** for intelligent features and document processing
+- **Build production-ready applications** with proper error handling, logging, and security
 
 ## 📄 License
 
 This is a personal project for learning and experimentation. Feel free to use it as a reference or starting point for your own projects.
 
+## 📊 Project Statistics
+
+- **Frontend**: ~2,000+ lines of TypeScript/React code
+- **Backend**: ~1,500+ lines of TypeScript/Nest.js code
+- **Database**: 3 migration files with RLS policies
+- **Components**: 10+ reusable React components
+- **API Endpoints**: 8+ RESTful endpoints
+- **Development Time**: Built as a learning project exploring Cursor AI workflows
+
+## 🎯 Use Cases
+
+This project demonstrates:
+- **Portfolio Project**: Showcases full-stack development skills for grad school applications
+- **Learning Resource**: Example of modern TypeScript/Next.js/Nest.js architecture
+- **Cursor AI Exploration**: Demonstrates AI-assisted development workflows (see [CURSOR_DEVELOPMENT.md](./CURSOR_DEVELOPMENT.md))
+- **Production Patterns**: Implements best practices for security, error handling, and code organization
+
+## 🎓 Portfolio Highlights for Grad School Applications
+
+This project showcases:
+
+### Technical Skills
+- ✅ **Full-Stack Development**: End-to-end application development
+- ✅ **Modern TypeScript**: Type-safe development across frontend and backend
+- ✅ **Framework Mastery**: Next.js 14 App Router and Nest.js architecture
+- ✅ **Database Design**: PostgreSQL with Row Level Security
+- ✅ **Authentication & Security**: OAuth 2.0, API key management, secure practices
+- ✅ **AI Integration**: LLM-powered features with OpenAI and LangChain
+
+### Development Process
+- ✅ **AI-Assisted Development**: Exploration of Cursor AI for pair programming
+- ✅ **Architecture Evolution**: Refactored from monolith to microservices
+- ✅ **Code Quality**: Type safety, error handling, logging, documentation
+- ✅ **Best Practices**: Following industry standards and patterns
+
+### Project Scope
+- ✅ **Production-Ready Patterns**: Security, scalability, maintainability
+- ✅ **Comprehensive Features**: Authentication, CRUD operations, AI features
+- ✅ **Well-Documented**: README, setup guides, development process documentation
+
 ## 🙏 Acknowledgments
 
-- Built with [Cursor](https://cursor.sh/) for AI-assisted development
-- Uses [Next.js](https://nextjs.org/) and [Nest.js](https://nestjs.com/) frameworks
-- Powered by [OpenAI](https://openai.com/) for AI capabilities
-- Database hosted on [Supabase](https://supabase.com/)
+- **Built with [Cursor](https://cursor.sh/)** - AI-assisted development platform
+- **Course Inspiration**: Following Eden Marco's course on Cursor development
+- **Frameworks**: [Next.js](https://nextjs.org/) and [Nest.js](https://nestjs.com/)
+- **AI Services**: [OpenAI](https://openai.com/) for LLM capabilities
+- **Database**: [Supabase](https://supabase.com/) for PostgreSQL hosting
+- **Authentication**: [NextAuth.js](https://next-auth.js.org/) for OAuth
 
 ---
 
-**Note**: This is a personal project meant for learning and experimentation. It may not be production-ready and should be used as a learning resource.
+**Note**: This project was built as a learning exercise to explore Cursor AI and modern full-stack development. It demonstrates production-ready patterns and can serve as a reference for similar projects.
